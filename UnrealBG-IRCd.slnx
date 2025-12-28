@@ -1,1 +1,3 @@
-<Solution />
+<Solution>
+  <Project Path="IRCd.Core/IRCd.Core.csproj" />
+</Solution>
