@@ -11,4 +11,9 @@
     <PackageReference Include="Serilog" Version="4.3.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\IRCd.Core\IRCd.Core.csproj" />
+    <ProjectReference Include="..\IRCd.Transport\IRCd.Transport.csproj" />
+  </ItemGroup>
+
 </Project>
