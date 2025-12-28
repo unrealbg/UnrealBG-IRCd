@@ -2,5 +2,6 @@
 {
     public interface IServerClock
     {
+        DateTimeOffset UtcNow { get; }
     }
 }
