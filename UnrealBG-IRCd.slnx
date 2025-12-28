@@ -4,6 +4,7 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="IRCd.Core/IRCd.Core.csproj" />
+    <Project Path="IRCd.Shared/IRCd.Shared.csproj" Id="b599476c-f295-4e76-aede-5c6bcb697b7d" />
   </Folder>
   <Folder Name="/transport/">
     <Project Path="IRCd.Transport/IRCd.Transport.csproj" />
