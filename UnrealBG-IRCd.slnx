@@ -1,4 +1,6 @@
 <Solution>
   <Project Path="IRCd.Core/IRCd.Core.csproj" />
+  <Project Path="IRCd.Server/IRCd.Server.csproj" Id="8cd265e8-3225-4d52-bf5b-d5af20769e3b" />
+  <Project Path="IRCd.Tests/IRCd.Tests.csproj" Id="973413bd-1b7f-45dd-9779-2bc380f345d1" />
   <Project Path="IRCd.Transport/IRCd.Transport.csproj" />
 </Solution>
