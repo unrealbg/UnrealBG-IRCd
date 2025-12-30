@@ -10,8 +10,13 @@
     {
         public string Command => "NICK";
         private readonly RoutingService _routing;
+        private readonly RegistrationService _registration;
 
-        public NickHandler(RoutingService routing) => _routing = routing;
+        public NickHandler(RoutingService routing, RegistrationService registration)
+        {
+            _routing = routing;
+            _registration = registration;
+        }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
@@ -44,6 +49,7 @@
             }
 
             session.Nick = newNick;
+            await _registration.TryCompleteRegistrationAsync(session, state, ct);
 
             if (string.IsNullOrWhiteSpace(oldNick))
             {
