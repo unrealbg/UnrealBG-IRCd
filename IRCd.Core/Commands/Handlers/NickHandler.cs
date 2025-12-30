@@ -3,38 +3,65 @@
     using IRCd.Core.Abstractions;
     using IRCd.Core.Commands.Contracts;
     using IRCd.Core.Protocol;
+    using IRCd.Core.Services;
     using IRCd.Core.State;
 
     public sealed class NickHandler : IIrcCommandHandler
     {
         public string Command => "NICK";
+        private readonly RoutingService _routing;
+
+        public NickHandler(RoutingService routing) => _routing = routing;
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
-            var nick = msg.Params.Count > 0 ? msg.Params[0] : msg.Trailing;
-            nick = nick?.Trim();
+            var newNick = msg.Params.Count > 0 ? msg.Params[0] : msg.Trailing;
+            newNick = newNick?.Trim();
 
-            if (string.IsNullOrWhiteSpace(nick))
+            if (string.IsNullOrWhiteSpace(newNick))
             {
-                await session.SendAsync($":server 431 * :No nickname given", ct);
+                await session.SendAsync(":server 431 * :No nickname given", ct);
                 return;
             }
 
-            if (nick.Length > 20)
+            if (newNick.Length > 20 || newNick.Contains(' ') || newNick.Contains(':'))
             {
-                await session.SendAsync($":server 432 * {nick} :Erroneous nickname", ct);
+                await session.SendAsync($":server 432 * {newNick} :Erroneous nickname", ct);
                 return;
             }
 
-            if (!state.TrySetNick(session.ConnectionId, nick))
+            var oldNick = session.Nick;
+
+            if (oldNick is not null && string.Equals(oldNick, newNick, StringComparison.OrdinalIgnoreCase))
             {
-                await session.SendAsync($":server 433 * {nick} :Nickname is already in use", ct);
                 return;
             }
 
-            session.Nick = nick;
+            if (!state.TrySetNick(session.ConnectionId, newNick))
+            {
+                await session.SendAsync($":server 433 * {newNick} :Nickname is already in use", ct);
+                return;
+            }
 
-            await session.SendAsync($":server NOTICE * :NICK set to {nick}", ct);
+            session.Nick = newNick;
+
+            if (string.IsNullOrWhiteSpace(oldNick))
+            {
+                await session.SendAsync($":server NOTICE * :NICK set to {newNick}", ct);
+                return;
+            }
+
+            var channels = state.UpdateNickInUserChannels(session.ConnectionId, newNick);
+
+            var user = session.UserName ?? "u";
+            var nickLine = $":{oldNick}!{user}@localhost NICK :{newNick}";
+
+            foreach (var ch in channels)
+            {
+                await _routing.BroadcastToChannelAsync(ch, nickLine, excludeConnectionId: session.ConnectionId, ct);
+            }
+
+            await session.SendAsync(nickLine, ct);
         }
     }
 }
