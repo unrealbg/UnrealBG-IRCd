@@ -1,6 +1,8 @@
-﻿using IRCd.Core.Commands;
+﻿using IRCd.Core.Abstractions;
+using IRCd.Core.Commands;
 using IRCd.Core.Commands.Contracts;
 using IRCd.Core.Commands.Handlers;
+using IRCd.Core.Services;
 using IRCd.Core.State;
 using IRCd.Shared.Options;
 using IRCd.Transport.Tcp;
@@ -28,13 +30,32 @@ var host = Host.CreateDefaultBuilder(args)
         // Options
         services.Configure<IrcOptions>(ctx.Configuration.GetSection("Irc"));
 
-        // Core
+        // Core state
         services.AddSingleton<ServerState>();
+
+        // Session registry (transport implementation, core abstraction)
+        services.AddSingleton<InMemorySessionRegistry>();
+        services.AddSingleton<ISessionRegistry>(sp => sp.GetRequiredService<InMemorySessionRegistry>());
+
+        // Routing (core service)
+        services.AddSingleton<RoutingService>();
+
+        // Registration service (core service)
+        services.AddSingleton<RegistrationService>();
+
+        // Flood protection (transport-level)
+        services.AddSingleton(new SimpleFloodGate(maxLines: 12, window: TimeSpan.FromSeconds(10)));
 
         // Command handlers
         services.AddSingleton<IIrcCommandHandler, PingHandler>();
         services.AddSingleton<IIrcCommandHandler, NickHandler>();
         services.AddSingleton<IIrcCommandHandler, UserHandler>();
+
+        services.AddSingleton<IIrcCommandHandler, JoinHandler>();
+        services.AddSingleton<IIrcCommandHandler, PartHandler>();
+        services.AddSingleton<IIrcCommandHandler, PrivMsgHandler>();
+        services.AddSingleton<IIrcCommandHandler, QuitHandler>();
+
         services.AddSingleton<CommandDispatcher>();
 
         // Transport
