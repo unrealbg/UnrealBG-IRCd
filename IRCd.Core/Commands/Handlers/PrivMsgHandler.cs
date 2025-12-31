@@ -43,7 +43,9 @@
                     return;
                 }
 
-                if (!channel.Contains(session.ConnectionId))
+                var isMember = channel.Contains(session.ConnectionId);
+
+                if (channel.Modes.HasFlag(ChannelModes.NoExternalMessages) && !isMember)
                 {
                     await session.SendAsync($":server 404 {fromNick} {target} :Cannot send to channel", ct);
                     return;
