@@ -94,15 +94,14 @@
         public bool TryJoinChannel(string connectionId, string nick, string channelName)
         {
             var channel = GetOrCreateChannel(channelName);
-            if (channel.Contains(connectionId))
-            {
-                return false;
-            }
+            if (channel.Contains(connectionId)) return false;
 
-            if (!channel.TryAddMember(new ChannelMember(connectionId, nick)))
-            {
+            var priv = !channel.Members.Any()
+                ? ChannelPrivilege.Owner
+                : ChannelPrivilege.Normal;
+
+            if (!channel.TryAddMember(connectionId, nick, priv))
                 return false;
-            }
 
             var set = _userChannels.GetOrAdd(connectionId, _ => new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase));
             set[channelName] = 0;
@@ -160,6 +159,147 @@
             {
                 _nickToConn.TryRemove(nick, out _);
             }
+        }
+
+        public bool TryApplyChannelModes(
+                string channelName,
+                string actorConnectionId,
+                IReadOnlyList<(ChannelModes Mode, bool Enable)> changes,
+                out Channel? channel,
+                out string? error)
+        {
+            error = null;
+            channel = null;
+
+            if (!_channels.TryGetValue(channelName, out var ch))
+            {
+                error = "No such channel";
+                return false;
+            }
+
+            channel = ch;
+
+            if (!ch.Contains(actorConnectionId))
+            {
+                error = "You're not on that channel";
+                return false;
+            }
+
+            if (!ch.HasPrivilege(actorConnectionId, ChannelPrivilege.Op))
+            {
+                error = "You're not channel operator";
+                return false;
+            }
+
+            var changedAnything = false;
+            foreach (var (mode, enable) in changes)
+                changedAnything |= ch.ApplyModeChange(mode, enable);
+
+            return changedAnything;
+        }
+
+        public ChannelPrivilege GetUserPrivilegeInChannel(string connectionId, string channelName)
+        {
+            if (_channels.TryGetValue(channelName, out var ch))
+                return ch.GetPrivilege(connectionId);
+
+            return ChannelPrivilege.Normal;
+        }
+
+        public bool TrySetChannelPrivilege(
+    string channelName,
+    string actorConnectionId,
+    char modeChar,
+    bool enable,
+    string targetNick,
+    out Channel? channel,
+    out string? error)
+        {
+            error = null;
+            channel = null;
+
+            if (!_channels.TryGetValue(channelName, out var ch))
+            {
+                error = "No such channel";
+                return false;
+            }
+
+            channel = ch;
+
+            if (!ch.Contains(actorConnectionId))
+            {
+                error = "You're not on that channel";
+                return false;
+            }
+
+            if (!TryGetConnectionIdByNick(targetNick, out var targetConn) || targetConn is null)
+            {
+                error = "No such nick";
+                return false;
+            }
+
+            if (!ch.Contains(targetConn))
+            {
+                error = "They aren't on that channel";
+                return false;
+            }
+
+            var actorPriv = ch.GetPrivilege(actorConnectionId);
+            var targetPriv = ch.GetPrivilege(targetConn);
+
+            var privToSet = modeChar switch
+            {
+                'v' => ChannelPrivilege.Voice,
+                'h' => ChannelPrivilege.HalfOp,
+                'o' => ChannelPrivilege.Op,
+                'a' => ChannelPrivilege.Admin,
+                'q' => ChannelPrivilege.Owner,
+                _ => ChannelPrivilege.Normal
+            };
+
+            if (privToSet == ChannelPrivilege.Normal)
+            {
+                error = "Unknown mode";
+                return false;
+            }
+
+            var required = modeChar switch
+            {
+                'v' or 'h' or 'o' => ChannelPrivilege.Op,
+                'a' => ChannelPrivilege.Admin,
+                'q' => ChannelPrivilege.Owner,
+                _ => ChannelPrivilege.Op
+            };
+
+            if (!actorPriv.IsAtLeast(required))
+            {
+                error = "You're not channel operator";
+                return false;
+            }
+
+            if (enable && privToSet > actorPriv)
+            {
+                error = "Insufficient privilege";
+                return false;
+            }
+
+            ChannelPrivilege newPriv;
+            if (enable)
+            {
+                newPriv = targetPriv < privToSet ? privToSet : targetPriv;
+            }
+            else
+            {
+                newPriv = targetPriv == privToSet ? ChannelPrivilege.Normal : targetPriv;
+            }
+
+            if (!enable && targetPriv > actorPriv)
+            {
+                error = "Insufficient privilege";
+                return false;
+            }
+
+            return ch.TryUpdateMemberPrivilege(targetConn, newPriv);
         }
     }
 }

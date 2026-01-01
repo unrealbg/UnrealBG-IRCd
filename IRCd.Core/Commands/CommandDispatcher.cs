@@ -16,14 +16,18 @@
 
         public async ValueTask DispatchAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
+            if (state.TryGetUser(session.ConnectionId, out User? user) && user is not null)
+            {
+                user.LastActivityUtc = DateTimeOffset.UtcNow;
+            }
+
             if (_handlers.TryGetValue(msg.Command, out var handler))
             {
                 await handler.HandleAsync(session, msg, state, ct);
                 return;
             }
 
-            var nick = session.Nick ?? "*";
-            await session.SendAsync($":server 421 {nick} {msg.Command} :Unknown command", ct);
+            await session.SendAsync($":server 421 {session.Nick ?? "*"} {msg.Command} :Unknown command", ct);
         }
     }
 }
