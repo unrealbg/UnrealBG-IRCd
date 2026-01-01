@@ -1,5 +1,9 @@
 ﻿namespace IRCd.Core.Commands.Handlers
 {
+    using System.Linq;
+    using System.Threading;
+    using System.Threading.Tasks;
+
     using IRCd.Core.Abstractions;
     using IRCd.Core.Commands.Contracts;
     using IRCd.Core.Protocol;
@@ -9,9 +13,13 @@
     public sealed class JoinHandler : IIrcCommandHandler
     {
         public string Command => "JOIN";
+
         private readonly RoutingService _routing;
 
-        public JoinHandler(RoutingService routing) => _routing = routing;
+        public JoinHandler(RoutingService routing)
+        {
+            _routing = routing;
+        }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
@@ -35,7 +43,24 @@
                 return;
             }
 
+            if (state.TryGetChannel(channelName, out var existing) && existing is not null)
+            {
+                var maskUserName = session.UserName ?? "u";
+                var host = "localhost";
+                var maskValue = $"{session.Nick}!{maskUserName}@{host}";
+
+                foreach (var ban in existing.Bans)
+                {
+                    if (MaskMatcher.IsMatch(ban.Mask, maskValue))
+                    {
+                        await session.SendAsync($":server 474 {session.Nick} {channelName} :Cannot join channel (+b)", ct);
+                        return;
+                    }
+                }
+            }
+
             var nick = session.Nick!;
+
             if (!state.TryJoinChannel(session.ConnectionId, nick, channelName))
             {
                 return;
@@ -46,8 +71,8 @@
                 return;
             }
 
-            var user = session.UserName ?? "u";
-            var joinLine = $":{nick}!{user}@localhost JOIN {channelName}";
+            var userName = session.UserName ?? "u";
+            var joinLine = $":{nick}!{userName}@localhost JOIN {channelName}";
 
             await _routing.BroadcastToChannelAsync(channel, joinLine, excludeConnectionId: null, ct);
 
@@ -67,11 +92,14 @@
         {
             var me = session.Nick!;
 
-            var names = channel.Members.Select(m =>
-            {
-                var p = m.Privilege.ToPrefix();
-                return p is null ? m.Nick : $"{p}{m.Nick}";
-            });
+            var names = channel.Members
+                .OrderByDescending(m => m.Privilege)
+                .ThenBy(m => m.Nick, System.StringComparer.OrdinalIgnoreCase)
+                .Select(m =>
+                {
+                    var p = m.Privilege.ToPrefix();
+                    return p is null ? m.Nick : $"{p}{m.Nick}";
+                });
 
             var line = string.Join(' ', names);
 
