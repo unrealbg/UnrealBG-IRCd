@@ -37,6 +37,8 @@
 
             var channelName = msg.Params[0];
 
+            var providedKey = msg.Params.Count > 1 ? msg.Params[1] : null;
+
             if (!channelName.StartsWith('#'))
             {
                 await session.SendAsync($":server 479 {session.Nick} {channelName} :Illegal channel name", ct);
@@ -57,6 +59,34 @@
                         return;
                     }
                 }
+
+                if (existing.Modes.HasFlag(ChannelModes.Limit) && existing.UserLimit.HasValue)
+                {
+                    if (existing.Members.Count >= existing.UserLimit.Value)
+                    {
+                        await session.SendAsync($":server 471 {session.Nick} {channelName} :Cannot join channel (+l)", ct);
+                        return;
+                    }
+                }
+
+                if (existing.Modes.HasFlag(ChannelModes.InviteOnly))
+                {
+                    var meNick = session.Nick!;
+                    if (!existing.IsInvited(meNick))
+                    {
+                        await session.SendAsync($":server 473 {session.Nick} {channelName} :Cannot join channel (+i)", ct);
+                        return;
+                    }
+                }
+
+                if (existing.Modes.HasFlag(ChannelModes.Key))
+                {
+                    if (string.IsNullOrWhiteSpace(existing.Key) || !string.Equals(existing.Key, providedKey))
+                    {
+                        await session.SendAsync($":server 475 {session.Nick} {channelName} :Cannot join channel (+k)", ct);
+                        return;
+                    }
+                }
             }
 
             var nick = session.Nick!;
@@ -70,6 +100,8 @@
             {
                 return;
             }
+
+            channel.RemoveInvite(session.Nick!);
 
             var userName = session.UserName ?? "u";
             var joinLine = $":{nick}!{userName}@localhost JOIN {channelName}";

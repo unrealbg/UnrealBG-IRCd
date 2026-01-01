@@ -9,6 +9,11 @@
 
         private readonly List<ChannelBan> _bans = new();
 
+        public string? Key { get; private set; }
+        public int? UserLimit { get; private set; }
+
+        private readonly HashSet<string> _invitedNicks = new(StringComparer.OrdinalIgnoreCase);
+
         public Channel(string name)
         {
             Name = name;
@@ -64,8 +69,42 @@
         public string FormatModeString()
         {
             var flags = new List<char>();
-            if (Modes.HasFlag(ChannelModes.NoExternalMessages)) flags.Add('n');
-            if (Modes.HasFlag(ChannelModes.TopicOpsOnly)) flags.Add('t');
+
+            if (Modes.HasFlag(ChannelModes.NoExternalMessages))
+            {
+                flags.Add('n');
+            }
+
+            if (Modes.HasFlag(ChannelModes.TopicOpsOnly))
+            {
+                flags.Add('t');
+            }
+
+            if (Modes.HasFlag(ChannelModes.InviteOnly))
+            {
+                flags.Add('i');
+            }
+
+            if (Modes.HasFlag(ChannelModes.Key))
+            {
+                flags.Add('k');
+            }
+
+            if (Modes.HasFlag(ChannelModes.Limit))
+            {
+                flags.Add('l');
+            }
+
+            if (Modes.HasFlag(ChannelModes.Moderated))
+            {
+                flags.Add('m');
+            }
+
+            if (Modes.HasFlag(ChannelModes.Secret))
+            {
+                flags.Add('s');
+            }
+
             return flags.Count == 0 ? "+" : "+" + new string(flags.ToArray());
         }
 
@@ -95,6 +134,33 @@
                 _bans.RemoveAt(idx);
                 return true;
             }
+        }
+
+        public bool IsInvited(string nick)
+        {
+            lock (_invitedNicks) return _invitedNicks.Contains(nick);
+        }
+
+        public void AddInvite(string nick)
+        {
+            lock (_invitedNicks) _invitedNicks.Add(nick);
+        }
+
+        public void RemoveInvite(string nick)
+        {
+            lock (_invitedNicks) _invitedNicks.Remove(nick);
+        }
+
+        public void SetKey(string? key)
+        {
+            Key = string.IsNullOrWhiteSpace(key) ? null : key;
+            ApplyModeChange(ChannelModes.Key, Key is not null);
+        }
+
+        public void SetLimit(int? limit)
+        {
+            UserLimit = (limit.HasValue && limit.Value > 0) ? limit.Value : null;
+            ApplyModeChange(ChannelModes.Limit, UserLimit is not null);
         }
     }
 

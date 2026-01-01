@@ -64,6 +64,8 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IIrcCommandHandler, TopicHandler>();
         services.AddSingleton<IIrcCommandHandler, KickHandler>();
 
+        services.AddSingleton<IIrcCommandHandler, InviteHandler>();
+
         services.AddSingleton<CommandDispatcher>();
 
         // Transport
