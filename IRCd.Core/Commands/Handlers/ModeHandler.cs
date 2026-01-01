@@ -98,10 +98,151 @@
                 }
 
                 if (c is 'n' or 't')
+                {
                     continue;
+                }
 
-                if (c is not ('q' or 'a' or 'o' or 'h' or 'v' or 'b'))
+                if (c is not ('q' or 'a' or 'o' or 'h' or 'v' or 'b' or 'i' or 'k' or 'l' or 'm' or 's'))
+                {
                     continue;
+                }
+
+                if (c is 'i' or 'k' or 'l' or 'm' or 's')
+                {
+                    if (!state.TryGetChannel(target, out var ch) || ch is null)
+                    {
+                        await session.SendAsync($":server 403 {session.Nick} {target} :No such channel", ct);
+                        return;
+                    }
+
+                    if (!ch.Contains(session.ConnectionId))
+                    {
+                        await session.SendAsync($":server 442 {session.Nick} {target} :You're not on that channel", ct);
+                        return;
+                    }
+
+                    if (!ch.HasPrivilege(session.ConnectionId, ChannelPrivilege.Op))
+                    {
+                        await session.SendAsync($":server 482 {session.Nick} {target} :You're not channel operator", ct);
+                        return;
+                    }
+
+                    var setOn = currentSign == '+';
+
+                    if (c == 'i')
+                    {
+                        var changed = ch.ApplyModeChange(ChannelModes.InviteOnly, setOn);
+                        if (!changed) continue;
+
+                        if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
+                        appliedModes.Add('i');
+                        continue;
+                    }
+
+                    if (c == 'k')
+                    {
+                        if (setOn)
+                        {
+                            if (msg.Params.Count <= argIndex)
+                            {
+                                await session.SendAsync($":server 461 {session.Nick} MODE :Not enough parameters", ct);
+                                return;
+                            }
+
+                            var key = msg.Params[argIndex++];
+                            ch.SetKey(key);
+
+                            if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
+                            appliedModes.Add('k');
+                            appliedArgs.Add(key);
+                        }
+                        else
+                        {
+                            ch.SetKey(null);
+
+                            if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
+                            appliedModes.Add('k');
+                        }
+
+                        continue;
+                    }
+
+                    if (c == 'l')
+                    {
+                        if (setOn)
+                        {
+                            if (msg.Params.Count <= argIndex)
+                            {
+                                await session.SendAsync($":server 461 {session.Nick} MODE :Not enough parameters", ct);
+                                return;
+                            }
+
+                            var raw = msg.Params[argIndex++];
+                            if (!int.TryParse(raw, out var limit) || limit <= 0)
+                            {
+                                await session.SendAsync($":server NOTICE * :Invalid limit", ct);
+                                return;
+                            }
+
+                            ch.SetLimit(limit);
+
+                            if (!appliedModes.Contains(currentSign))
+                            {
+                                appliedModes.Insert(0, currentSign);
+                            }
+
+                            appliedModes.Add('l');
+                            appliedArgs.Add(raw);
+                        }
+                        else
+                        {
+                            ch.SetLimit(null);
+
+                            if (!appliedModes.Contains(currentSign))
+                            {
+                                appliedModes.Insert(0, currentSign);
+                            }
+
+                            appliedModes.Add('l');
+                        }
+
+                        continue;
+                    }
+
+                    if (c == 'm')
+                    {
+                        var changed = ch.ApplyModeChange(ChannelModes.Moderated, setOn);
+                        if (!changed)
+                        {
+                            continue;
+                        }
+
+                        if (!appliedModes.Contains(currentSign))
+                        {
+                            appliedModes.Insert(0, currentSign);
+                        }
+
+                        appliedModes.Add('m');
+                        continue;
+                    }
+
+                    if (c == 's')
+                    {
+                        var changed = ch.ApplyModeChange(ChannelModes.Secret, setOn);
+                        if (!changed)
+                        {
+                            continue;
+                        }
+
+                        if (!appliedModes.Contains(currentSign))
+                        {
+                            appliedModes.Insert(0, currentSign);
+                        }
+
+                        appliedModes.Add('s');
+                        continue;
+                    }
+                }
 
                 if (c == 'b')
                 {
