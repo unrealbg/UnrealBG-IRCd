@@ -1,18 +1,23 @@
 ﻿namespace IRCd.Transport.Tcp
 {
+    using System;
+    using System.Collections.Generic;
+    using System.Net;
+    using System.Net.Sockets;
+    using System.Text;
+    using System.Threading;
+    using System.Threading.Tasks;
+
+    using IRCd.Core.Abstractions;
     using IRCd.Core.Commands;
     using IRCd.Core.Protocol;
+    using IRCd.Core.Services;
     using IRCd.Core.State;
     using IRCd.Shared.Options;
 
     using Microsoft.Extensions.Hosting;
     using Microsoft.Extensions.Logging;
     using Microsoft.Extensions.Options;
-    using Microsoft.Win32;
-
-    using System;
-    using System.Net;
-    using System.Net.Sockets;
 
     public sealed class TcpListenerHostedService : BackgroundService
     {
@@ -20,87 +25,164 @@
         private readonly CommandDispatcher _dispatcher;
         private readonly ServerState _state;
         private readonly IOptions<IrcOptions> _options;
-        private readonly InMemorySessionRegistry _registry;
-        private readonly SimpleFloodGate _flood;
+        private readonly ISessionRegistry _sessions;
+
+        private readonly ConnectionGuardService _guard;
+
+        private readonly RoutingService _routing;
+
         private TcpListener? _listener;
 
         public TcpListenerHostedService(
-    ILogger<TcpListenerHostedService> logger,
-    CommandDispatcher dispatcher,
-    ServerState state,
-    IOptions<IrcOptions> options,
-    InMemorySessionRegistry registry,
-    SimpleFloodGate flood)
+            ILogger<TcpListenerHostedService> logger,
+            CommandDispatcher dispatcher,
+            ServerState state,
+            IOptions<IrcOptions> options,
+            ISessionRegistry sessions,
+            ConnectionGuardService guard,
+            RoutingService routing)
         {
             _logger = logger;
             _dispatcher = dispatcher;
             _state = state;
             _options = options;
-            _registry = registry;
-            _flood = flood;
+            _sessions = sessions;
+            _guard = guard;
+            _routing = routing;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            var opt = _options.Value;
-
-            var ip = IPAddress.TryParse(opt.BindAddress, out var parsed) ? parsed : IPAddress.Any;
-            var port = opt.IrcPort;
+            var ip = IPAddress.Any;
+            var port = _options.Value.IrcPort;
 
             _listener = new TcpListener(ip, port);
             _listener.Start();
 
             _logger.LogInformation("IRCd listening on {IP}:{Port}", ip, port);
 
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                while (!stoppingToken.IsCancellationRequested)
+                TcpClient client;
+                try
                 {
-                    var client = await _listener.AcceptTcpClientAsync(stoppingToken);
-                    _ = Task.Run(() => HandleClientAsync(client, stoppingToken), stoppingToken);
+                    client = await _listener.AcceptTcpClientAsync(stoppingToken);
                 }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Accept failed");
+                    continue;
+                }
+
+                _ = Task.Run(() => HandleClientAsync(client, stoppingToken), stoppingToken);
             }
-            catch (OperationCanceledException)
-            {
-                // normal shutdown
-            }
-            finally
-            {
-                try { _listener.Stop(); } catch { /* ignore */ }
-            }
+        }
+
+        public override Task StopAsync(CancellationToken cancellationToken)
+        {
+            try { _listener?.Stop(); } catch { /* ignore */ }
+            return base.StopAsync(cancellationToken);
+        }
+
+        private static IPAddress GetRemoteIp(TcpClient client)
+        {
+            if (client.Client.RemoteEndPoint is IPEndPoint ep)
+                return ep.Address;
+
+            return IPAddress.None;
         }
 
         private async Task HandleClientAsync(TcpClient client, CancellationToken ct)
         {
+            var remoteIp = GetRemoteIp(client);
+
+            if (_guard.Enabled)
+            {
+                if (!_guard.TryAcceptNewConnection(remoteIp, out var rejectReason))
+                {
+                    try
+                    {
+                        using var stream = client.GetStream();
+                        using var writer = new System.IO.StreamWriter(stream, new UTF8Encoding(false))
+                        {
+                            NewLine = "\r\n",
+                            AutoFlush = true
+                        };
+
+                        await writer.WriteLineAsync($"ERROR :{rejectReason}");
+                    }
+                    catch { /* ignore */ }
+
+                    try { client.Close(); } catch { /* ignore */ }
+                    return;
+                }
+            }
+
             var connectionId = Guid.NewGuid().ToString("N");
             var session = new TcpClientSession(connectionId, client);
 
-            _registry.TryAdd(session);
-
             _state.TryAddUser(new User { ConnectionId = connectionId });
+            _sessions.Add(session);
 
             _logger.LogInformation("Client connected {ConnId} from {Remote}", connectionId, session.RemoteEndPoint);
 
             var writerTask = Task.Run(() => session.RunWriterLoopAsync(ct), ct);
 
             await session.SendAsync(":server NOTICE * :Welcome. Use NICK/USER.", ct);
-            await session.SendAsync(":server NOTICE * :Try: JOIN #test | PRIVMSG #test :hello | QUIT :bye", ct);
+
+            Task<string?>? pendingRead = null;
+
+            var registrationDeadlineUtc = DateTimeOffset.UtcNow.AddSeconds(_guard.GetRegistrationTimeoutSeconds());
+            var unregisteredReleased = false;
+            var markedRegistered = false;
 
             try
             {
                 while (!ct.IsCancellationRequested)
                 {
-                    var line = await session.ReadLineAsync(ct);
-                    if (line is null) break;
-
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-
-                    if (!_flood.Allow(connectionId))
+                    if (_guard.Enabled && !session.IsRegistered && DateTimeOffset.UtcNow > registrationDeadlineUtc)
                     {
-                        await session.SendAsync(":server NOTICE * :Flood detected, closing link", ct);
-                        await session.CloseAsync("Excess flood", ct);
+                        try { await session.SendAsync("ERROR :Registration timeout", ct); } catch { /* ignore */ }
+                        try { await session.CloseAsync("Registration timeout", ct); } catch { /* ignore */ }
                         break;
                     }
+
+                    pendingRead ??= session.ReadLineAsync(ct);
+
+                    var tick = Task.Delay(TimeSpan.FromSeconds(1), ct);
+                    var completed = await Task.WhenAny(pendingRead, tick);
+
+                    if (completed != pendingRead)
+                    {
+                        continue;
+                    }
+
+                    string? line;
+                    try
+                    {
+                        line = await pendingRead;
+                    }
+                    catch (ObjectDisposedException) { break; }
+                    catch (InvalidOperationException) { break; }
+
+                    pendingRead = null;
+
+                    if (line is null)
+                    {
+                        // remote closed
+                        break;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(line))
+                    {
+                        continue;
+                    }
+
+                    session.OnInboundLine();
 
                     IrcMessage msg;
                     try
@@ -110,12 +192,26 @@
                     catch (Exception ex)
                     {
                         _logger.LogDebug(ex, "Bad line from {ConnId}: {Line}", connectionId, line);
-                        await session.SendAsync(":server NOTICE * :Bad line", ct);
                         continue;
                     }
 
                     await _dispatcher.DispatchAsync(session, msg, _state, ct);
+
+                    if (!markedRegistered && session.IsRegistered)
+                    {
+                        markedRegistered = true;
+
+                        if (_guard.Enabled)
+                        {
+                            _guard.MarkRegistered(remoteIp);
+                            unregisteredReleased = true; // it's no longer "unregistered"
+                        }
+                    }
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                // shutdown
             }
             catch (Exception ex)
             {
@@ -123,16 +219,47 @@
             }
             finally
             {
-                _registry.TryRemove(connectionId, out _);
-                _flood.Remove(connectionId);
-
-                _state.RemoveUser(connectionId);
-
                 try
                 {
-                    await session.CloseAsync("Client disconnected", ct);
+                    if (session.IsRegistered && !string.IsNullOrWhiteSpace(session.Nick))
+                    {
+                        var nick = session.Nick!;
+                        var user = session.UserName ?? "u";
+                        var host = "localhost";
+
+                        var quitLine = $":{nick}!{user}@{host} QUIT :Client disconnected";
+
+                        var recipients = new HashSet<string>(StringComparer.Ordinal);
+
+                        foreach (var chName in _state.GetUserChannels(connectionId))
+                        {
+                            if (_state.TryGetChannel(chName, out var ch) && ch is not null)
+                            {
+                                foreach (var m in ch.Members)
+                                {
+                                    if (m.ConnectionId != connectionId)
+                                        recipients.Add(m.ConnectionId);
+                                }
+                            }
+                        }
+
+                        foreach (var rid in recipients)
+                        {
+                            await _routing.SendToUserAsync(rid, quitLine, CancellationToken.None);
+                        }
+                    }
                 }
                 catch { /* ignore */ }
+
+                try { _sessions.Remove(connectionId); } catch { /* ignore */ }
+                try { _state.RemoveUser(connectionId); } catch { /* ignore */ }
+
+                if (_guard.Enabled && !session.IsRegistered && !unregisteredReleased)
+                {
+                    try { _guard.ReleaseUnregistered(remoteIp); } catch { /* ignore */ }
+                }
+
+                try { await session.CloseAsync("Client disconnected", CancellationToken.None); } catch { /* ignore */ }
 
                 _logger.LogInformation("Client disconnected {ConnId}", connectionId);
             }
