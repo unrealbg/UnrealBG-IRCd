@@ -36,7 +36,6 @@
             }
 
             var channelName = msg.Params[0];
-
             var providedKey = msg.Params.Count > 1 ? msg.Params[1] : null;
 
             if (!channelName.StartsWith('#'))
@@ -60,37 +59,29 @@
                     }
                 }
 
-                if (existing.Modes.HasFlag(ChannelModes.Limit) && existing.UserLimit.HasValue)
+                if (existing.Modes.HasFlag(ChannelModes.Limit) && existing.UserLimit.HasValue &&
+                    existing.Members.Count >= existing.UserLimit.Value)
                 {
-                    if (existing.Members.Count >= existing.UserLimit.Value)
-                    {
-                        await session.SendAsync($":server 471 {session.Nick} {channelName} :Cannot join channel (+l)", ct);
-                        return;
-                    }
+                    await session.SendAsync($":server 471 {session.Nick} {channelName} :Cannot join channel (+l)", ct);
+                    return;
                 }
 
-                if (existing.Modes.HasFlag(ChannelModes.InviteOnly))
+                if (existing.Modes.HasFlag(ChannelModes.InviteOnly) &&
+                    !existing.IsInvited(session.Nick!))
                 {
-                    var meNick = session.Nick!;
-                    if (!existing.IsInvited(meNick))
-                    {
-                        await session.SendAsync($":server 473 {session.Nick} {channelName} :Cannot join channel (+i)", ct);
-                        return;
-                    }
+                    await session.SendAsync($":server 473 {session.Nick} {channelName} :Cannot join channel (+i)", ct);
+                    return;
                 }
 
-                if (existing.Modes.HasFlag(ChannelModes.Key))
+                if (existing.Modes.HasFlag(ChannelModes.Key) &&
+                    !string.Equals(existing.Key, providedKey))
                 {
-                    if (string.IsNullOrWhiteSpace(existing.Key) || !string.Equals(existing.Key, providedKey))
-                    {
-                        await session.SendAsync($":server 475 {session.Nick} {channelName} :Cannot join channel (+k)", ct);
-                        return;
-                    }
+                    await session.SendAsync($":server 475 {session.Nick} {channelName} :Cannot join channel (+k)", ct);
+                    return;
                 }
             }
 
             var nick = session.Nick!;
-
             if (!state.TryJoinChannel(session.ConnectionId, nick, channelName))
             {
                 return;
@@ -101,7 +92,7 @@
                 return;
             }
 
-            channel.RemoveInvite(session.Nick!);
+            channel.RemoveInvite(nick);
 
             var userName = session.UserName ?? "u";
             var joinLine = $":{nick}!{userName}@localhost JOIN {channelName}";
@@ -133,9 +124,7 @@
                     return p is null ? m.Nick : $"{p}{m.Nick}";
                 });
 
-            var line = string.Join(' ', names);
-
-            await session.SendAsync($":server 353 {me} = {channel.Name} :{line}", ct);
+            await session.SendAsync($":server 353 {me} = {channel.Name} :{string.Join(' ', names)}", ct);
             await session.SendAsync($":server 366 {me} {channel.Name} :End of /NAMES list.", ct);
         }
     }
