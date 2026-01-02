@@ -15,7 +15,11 @@
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
-            if (!Commands.CommandGuards.EnsureRegistered(session, ct, out var err)) { await err; return; }
+            if (!Commands.CommandGuards.EnsureRegistered(session, ct, out var err))
+            {
+                await err;
+                return;
+            }
 
             var channelName = msg.Params.Count > 0 ? msg.Params[0] : msg.Trailing;
             channelName = channelName?.Trim();

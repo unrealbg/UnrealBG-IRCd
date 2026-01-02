@@ -21,10 +21,14 @@
             {
                 var myChannels = state.GetUserChannels(session.ConnectionId);
                 foreach (var chName in myChannels)
+                {
                     await SendNamesForChannel(session, chName, state, ct);
+                }
 
                 if (myChannels.Count == 0)
+                {
                     await session.SendAsync($":server 366 {session.Nick} * :End of /NAMES list.", ct);
+                }
 
                 return;
             }
@@ -33,7 +37,9 @@
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
             foreach (var chName in targets)
+            {
                 await SendNamesForChannel(session, chName, state, ct);
+            }
         }
 
         private static async ValueTask SendNamesForChannel(IClientSession session, string channelName, ServerState state, CancellationToken ct)

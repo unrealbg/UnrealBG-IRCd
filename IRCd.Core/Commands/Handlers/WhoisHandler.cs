@@ -1,11 +1,15 @@
 ﻿namespace IRCd.Core.Commands.Handlers
 {
+    using System;
+    using System.Collections.Generic;
+    using System.Linq;
+    using System.Threading;
+    using System.Threading.Tasks;
+
     using IRCd.Core.Abstractions;
     using IRCd.Core.Commands.Contracts;
     using IRCd.Core.Protocol;
     using IRCd.Core.State;
-
-    using System;
 
     public sealed class WhoisHandler : IIrcCommandHandler
     {
@@ -25,40 +29,85 @@
                 return;
             }
 
-            var nick = msg.Params.Count == 1 ? msg.Params[0] : msg.Params[^1];
+            var me = session.Nick!;
+            var targetNick = msg.Params[0];
 
-            if (!state.TryGetConnectionIdByNick(nick, out var connId) || connId is null ||
-                !state.TryGetUser(connId, out var user) || user is null)
+            if (!state.TryGetConnectionIdByNick(targetNick, out var targetConn) || targetConn is null)
             {
-                await session.SendAsync($":server 401 {session.Nick} {nick} :No such nick", ct);
-                await session.SendAsync($":server 318 {session.Nick} {nick} :End of /WHOIS list.", ct);
+                await session.SendAsync($":server 401 {me} {targetNick} :No such nick", ct);
+                await session.SendAsync($":server 318 {me} {targetNick} :End of /WHOIS list.", ct);
                 return;
             }
 
-            var uName = user.UserName ?? "u";
-            var host = "localhost";
-            var real = user.RealName ?? "Unknown";
-
-            await session.SendAsync($":server 311 {session.Nick} {user.Nick} {uName} {host} * :{real}", ct);
-            await session.SendAsync($":server 312 {session.Nick} {user.Nick} server :IRCd", ct);
-
-            var chs = state.GetUserChannels(connId);
-            if (chs.Count > 0)
+            if (!state.TryGetUser(targetConn, out var targetUser) || targetUser is null)
             {
-                var list = string.Join(' ', chs.Select(chName =>
-                {
-                    var p = state.GetUserPrivilegeInChannel(connId, chName).ToPrefix();
-                    return p is null ? chName : $"{p}{chName}";
-                }));
-
-                await session.SendAsync($":server 319 {session.Nick} {user.Nick} :{list}", ct);
+                await session.SendAsync($":server 401 {me} {targetNick} :No such nick", ct);
+                await session.SendAsync($":server 318 {me} {targetNick} :End of /WHOIS list.", ct);
+                return;
             }
 
-            var idleSecs = (int)Math.Max(0, (DateTimeOffset.UtcNow - user.LastActivityUtc).TotalSeconds);
-            var signonTs = user.ConnectedAtUtc.ToUnixTimeSeconds();
-            await session.SendAsync($":server 317 {session.Nick} {user.Nick} {idleSecs} {signonTs} :seconds idle, signon time", ct);
+            var userName = string.IsNullOrWhiteSpace(targetUser.UserName) ? "u" : targetUser.UserName!;
+            var host = "localhost";
+            var realName = string.IsNullOrWhiteSpace(targetUser.RealName) ? "Unknown" : targetUser.RealName!;
+            await session.SendAsync($":server 311 {me} {targetUser.Nick} {userName} {host} * :{realName}", ct);
 
-            await session.SendAsync($":server 318 {session.Nick} {user.Nick} :End of /WHOIS list.", ct);
+            await session.SendAsync($":server 312 {me} {targetUser.Nick} server :IRCd (.NET)", ct);
+
+            var chanList = BuildWhoisChannelList(requesterConnId: session.ConnectionId, targetConnId: targetConn, state);
+            if (chanList.Count > 0)
+            {
+                await session.SendAsync($":server 319 {me} {targetUser.Nick} :{string.Join(' ', chanList)}", ct);
+            }
+
+            var now = DateTimeOffset.UtcNow;
+
+            var connectedAt = targetUser.ConnectedAtUtc;
+            if (connectedAt == default)
+            {
+                connectedAt = now;
+            }
+
+            var lastActivity = targetUser.LastActivityUtc;
+            if (lastActivity == default)
+            {
+                lastActivity = connectedAt;
+            }
+
+            var idleSeconds = (long)Math.Max(0, (now - lastActivity).TotalSeconds);
+
+            await session.SendAsync(
+                $":server 317 {me} {targetUser.Nick} {idleSeconds} {connectedAt.ToUnixTimeSeconds()} :seconds idle, signon time",
+                ct);
+
+            await session.SendAsync($":server 318 {me} {targetUser.Nick} :End of /WHOIS list.", ct);
+        }
+
+        private static List<string> BuildWhoisChannelList(string requesterConnId, string targetConnId, ServerState state)
+        {
+            var result = new List<string>();
+
+            foreach (var ch in state.GetAllChannels())
+            {
+                if (!ch.Contains(targetConnId))
+                {
+                    continue;
+                }
+
+                if (ch.Modes.HasFlag(ChannelModes.Secret) && !ch.Contains(requesterConnId))
+                {
+                    continue;
+                }
+
+                var priv = ch.GetPrivilege(targetConnId);
+                var pfx = priv.ToPrefix();
+
+                result.Add(pfx is null ? ch.Name : $"{pfx}{ch.Name}");
+            }
+
+            return result
+                .OrderBy(s => s[0] == '#' ? 1 : 0)
+                .ThenBy(s => s.TrimStart('*', '&', '@', '%', '+', '~'), StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
     }
 }
