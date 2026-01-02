@@ -37,9 +37,10 @@
             }
 
             var target = msg.Params[0];
+
             if (!target.StartsWith('#'))
             {
-                await session.SendAsync($":server 501 {session.Nick} :Unknown MODE flags", ct);
+                await HandleUserModeAsync(session, msg, target, ct);
                 return;
             }
 
@@ -58,7 +59,7 @@
             var modeToken = msg.Params[1];
             if (string.IsNullOrWhiteSpace(modeToken) || (modeToken[0] != '+' && modeToken[0] != '-'))
             {
-                await session.SendAsync($":server 501 {session.Nick} :Unknown MODE flags", ct);
+                await session.SendAsync($":server 501 {session.Nick} :Unknown MODE flag", ct);
                 return;
             }
 
@@ -180,7 +181,7 @@
                             var raw = msg.Params[argIndex++];
                             if (!int.TryParse(raw, out var limit) || limit <= 0)
                             {
-                                await session.SendAsync($":server NOTICE * :Invalid limit", ct);
+                                await session.SendAsync($":server 461 {session.Nick} MODE :Invalid limit", ct);
                                 return;
                             }
 
@@ -212,16 +213,9 @@
                     if (c == 'm')
                     {
                         var changed = ch.ApplyModeChange(ChannelModes.Moderated, setOn);
-                        if (!changed)
-                        {
-                            continue;
-                        }
+                        if (!changed) continue;
 
-                        if (!appliedModes.Contains(currentSign))
-                        {
-                            appliedModes.Insert(0, currentSign);
-                        }
-
+                        if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
                         appliedModes.Add('m');
                         continue;
                     }
@@ -229,16 +223,9 @@
                     if (c == 's')
                     {
                         var changed = ch.ApplyModeChange(ChannelModes.Secret, setOn);
-                        if (!changed)
-                        {
-                            continue;
-                        }
+                        if (!changed) continue;
 
-                        if (!appliedModes.Contains(currentSign))
-                        {
-                            appliedModes.Insert(0, currentSign);
-                        }
-
+                        if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
                         appliedModes.Add('s');
                         continue;
                     }
@@ -283,19 +270,11 @@
                     var setter = session.Nick ?? "*";
 
                     var changedBan = banEnable ? ch.AddBan(mask, setter) : ch.RemoveBan(mask);
-                    if (!changedBan)
-                    {
-                        continue;
-                    }
+                    if (!changedBan) continue;
 
-                    if (!appliedModes.Contains(currentSign))
-                    {
-                        appliedModes.Insert(0, currentSign);
-                    }
-
+                    if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
                     appliedModes.Add('b');
                     appliedArgs.Add(mask);
-
                     continue;
                 }
 
@@ -348,6 +327,42 @@
 
             var line = $":{nick}!{userName}@localhost MODE {target} {modeOut}{argsOut}";
             await _routing.BroadcastToChannelAsync(finalChannel, line, excludeConnectionId: null, ct);
+        }
+
+        private static async ValueTask HandleUserModeAsync(IClientSession session, IrcMessage msg, string targetNick, CancellationToken ct)
+        {
+            var serverName = "server";
+            var me = session.Nick ?? "*";
+
+            if (!string.Equals(targetNick, me, System.StringComparison.OrdinalIgnoreCase))
+            {
+                await session.SendAsync($":{serverName} 502 {me} :Can't change mode for other users", ct);
+                return;
+            }
+
+            if (msg.Params.Count == 1)
+            {
+                var modes = session.UserModes;
+                var outModes = string.IsNullOrEmpty(modes) ? "+" : "+" + modes;
+                await session.SendAsync($":{serverName} 221 {me} {outModes}", ct);
+                return;
+            }
+
+            var modeString = msg.Params[1];
+            if (string.IsNullOrWhiteSpace(modeString) || (modeString[0] != '+' && modeString[0] != '-'))
+            {
+                await session.SendAsync($":{serverName} 501 {me} :Unknown MODE flag", ct);
+                return;
+            }
+
+            if (!session.TryApplyUserModes(modeString, out var normalized))
+            {
+                await session.SendAsync($":{serverName} 501 {me} :Unknown MODE flag", ct);
+                return;
+            }
+
+            var user = session.UserName ?? "u";
+            await session.SendAsync($":{me}!{user}@localhost MODE {me} {normalized}", ct);
         }
 
         private static List<(ChannelModes Mode, bool Enable)> ParseChannelModeChanges(string token)

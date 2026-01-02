@@ -53,7 +53,6 @@
 
             if (string.IsNullOrWhiteSpace(oldNick))
             {
-                await session.SendAsync($":server NOTICE * :NICK set to {newNick}", ct);
                 return;
             }
 

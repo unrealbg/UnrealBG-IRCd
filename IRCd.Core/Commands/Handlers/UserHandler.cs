@@ -31,8 +31,6 @@
                 user.UserName = userName;
             }
 
-            await session.SendAsync($":server NOTICE * :USER set to {userName}", ct);
-
             await _registration.TryCompleteRegistrationAsync(session, state, ct);
         }
     }

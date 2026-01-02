@@ -1,5 +1,8 @@
 ﻿namespace IRCd.Core.Services
 {
+    using System.Threading;
+    using System.Threading.Tasks;
+
     using IRCd.Core.Abstractions;
     using IRCd.Core.State;
 
@@ -12,21 +15,34 @@
             _sessions = sessions;
         }
 
-        public async ValueTask SendToUserAsync(string connectionId, string line, CancellationToken ct)
-        {
-            if (_sessions.TryGetSession(connectionId, out var s) && s is not null)
-                await s.SendAsync(line, ct);
-        }
-
-        public async ValueTask BroadcastToChannelAsync(Channel channel, string line, string? excludeConnectionId, CancellationToken ct)
+        public async ValueTask BroadcastToChannelAsync(
+            Channel channel,
+            string line,
+            string? excludeConnectionId,
+            CancellationToken ct)
         {
             foreach (var member in channel.Members)
             {
-                if (excludeConnectionId is not null && member.ConnectionId == excludeConnectionId)
+                if (member.ConnectionId == excludeConnectionId)
+                {
                     continue;
+                }
 
-                if (_sessions.TryGetSession(member.ConnectionId, out var s) && s is not null)
-                    await s.SendAsync(line, ct);
+                if (_sessions.TryGet(member.ConnectionId, out var session) && session is not null)
+                {
+                    await session.SendAsync(line, ct);
+                }
+            }
+        }
+
+        public async ValueTask SendToUserAsync(
+            string connectionId,
+            string line,
+            CancellationToken ct)
+        {
+            if (_sessions.TryGet(connectionId, out var session) && session is not null)
+            {
+                await session.SendAsync(line, ct);
             }
         }
     }

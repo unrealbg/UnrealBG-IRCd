@@ -301,5 +301,17 @@
 
             return ch.TryUpdateMemberPrivilege(targetConn, newPriv);
         }
+
+        public IEnumerable<Channel> GetAllChannels()
+        {
+            return _channels.Values;
+        }
+
+        public IReadOnlyCollection<User> GetAllUsers()
+                 => _usersByConn.Values.ToArray();
+
+        public int UserCount => _usersByConn.Count;
+
+        public DateTimeOffset CreatedUtc { get; } = DateTimeOffset.UtcNow;
     }
 }

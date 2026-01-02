@@ -1,5 +1,10 @@
 ﻿namespace IRCd.Core.Commands.Handlers
 {
+    using System;
+    using System.Collections.Generic;
+    using System.Threading;
+    using System.Threading.Tasks;
+
     using IRCd.Core.Abstractions;
     using IRCd.Core.Commands.Contracts;
     using IRCd.Core.Protocol;
@@ -9,26 +14,55 @@
     public sealed class QuitHandler : IIrcCommandHandler
     {
         public string Command => "QUIT";
+
         private readonly RoutingService _routing;
 
-        public QuitHandler(RoutingService routing) => _routing = routing;
+        public QuitHandler(RoutingService routing)
+        {
+            _routing = routing;
+        }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
-            var nick = session.Nick ?? "*";
-            var reason = msg.Trailing ?? "Client Quit";
-
-            var channels = state.GetUserChannels(session.ConnectionId);
-            foreach (var chName in channels)
+            var reason = msg.Trailing;
+            if (string.IsNullOrWhiteSpace(reason))
             {
-                if (state.TryGetChannel(chName, out var ch) && ch is not null)
-                {
-                    var quitLine = $":{nick}!{session.UserName ?? "u"}@localhost QUIT :{reason}";
-                    await _routing.BroadcastToChannelAsync(ch, quitLine, excludeConnectionId: session.ConnectionId, ct);
-                }
+                reason = "Client Quit";
             }
 
-            state.RemoveUser(session.ConnectionId);
+            if (session.IsRegistered && !string.IsNullOrWhiteSpace(session.Nick))
+            {
+                var nick = session.Nick!;
+                var user = session.UserName ?? "u";
+                var host = "localhost";
+
+                var quitLine = $":{nick}!{user}@{host} QUIT :{reason}";
+
+                var recipients = new HashSet<string>(StringComparer.Ordinal);
+
+                foreach (var chName in state.GetUserChannels(session.ConnectionId))
+                {
+                    if (!state.TryGetChannel(chName, out var ch) || ch is null)
+                    {
+                        continue;
+                    }
+
+                    foreach (var member in ch.Members)
+                    {
+                        if (member.ConnectionId == session.ConnectionId)
+                        {
+                            continue;
+                        }
+
+                        recipients.Add(member.ConnectionId);
+                    }
+                }
+
+                foreach (var connId in recipients)
+                {
+                    await _routing.SendToUserAsync(connId, quitLine, ct);
+                }
+            }
 
             await session.CloseAsync(reason, ct);
         }

@@ -2,10 +2,13 @@
 {
     using IRCd.Core.Abstractions;
 
+    using System;
     using System.Net;
     using System.Net.Sockets;
     using System.Text;
+    using System.Threading;
     using System.Threading.Channels;
+    using System.Threading.Tasks;
 
     public sealed class TcpClientSession : IClientSession
     {
@@ -13,10 +16,14 @@
         private readonly NetworkStream _stream;
         private readonly StreamReader _reader;
         private readonly StreamWriter _writer;
+        private readonly object _userModesLock = new();
+        private string _userModes = "";
 
         private readonly Channel<string> _outgoing;
 
         private int _closed;
+
+        private string? _lastPingToken;
 
         public TcpClientSession(string connectionId, TcpClient client)
         {
@@ -42,14 +49,91 @@
                 SingleWriter = false,
                 AllowSynchronousContinuations = true
             });
+
+            LastActivityUtc = DateTime.UtcNow;
+        }
+
+        public string UserModes
+        {
+            get { lock (_userModesLock) return _userModes; }
         }
 
         public string ConnectionId { get; }
+
         public EndPoint RemoteEndPoint { get; }
 
         public string? Nick { get; set; }
+
         public string? UserName { get; set; }
+
         public bool IsRegistered { get; set; }
+
+        public DateTime LastActivityUtc { get; private set; }
+
+        public DateTime LastPingUtc { get; private set; }
+
+        public bool AwaitingPong { get; private set; }
+
+        public string? LastPingToken => _lastPingToken;
+
+        public bool TryApplyUserModes(string modeString, out string normalizedModes)
+        {
+            normalizedModes = "";
+
+            if (string.IsNullOrWhiteSpace(modeString))
+                return true;
+
+            var adding = true;
+
+            lock (_userModesLock)
+            {
+                var set = new HashSet<char>(_userModes);
+
+                foreach (var ch in modeString)
+                {
+                    if (ch == '+') { adding = true; continue; }
+                    if (ch == '-') { adding = false; continue; }
+
+                    if (ch is not ('i' or 'w' or 's'))
+                    {
+                        return false;
+                    }
+
+                    if (adding) set.Add(ch);
+                    else set.Remove(ch);
+                }
+
+                var arr = set.ToArray();
+                Array.Sort(arr);
+
+                _userModes = new string(arr);
+                normalizedModes = "+" + _userModes;
+                return true;
+            }
+        }
+
+
+        public void OnInboundLine()
+        {
+            LastActivityUtc = DateTime.UtcNow;
+        }
+
+        public void OnPingSent(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+                return;
+
+            _lastPingToken = token;
+            LastPingUtc = DateTime.UtcNow;
+            AwaitingPong = true;
+        }
+
+        public void OnPongReceived(string? token)
+        {
+            AwaitingPong = false;
+            _lastPingToken = null;
+            LastActivityUtc = DateTime.UtcNow;
+        }
 
         /// <summary>
         /// Enqueue a line to be sent to the client (CRLF will be added by writer).
@@ -59,6 +143,8 @@
         {
             if (Volatile.Read(ref _closed) == 1)
                 return ValueTask.CompletedTask;
+
+            LastActivityUtc = DateTime.UtcNow;
 
             _outgoing.Writer.TryWrite(line);
             return ValueTask.CompletedTask;
@@ -127,7 +213,7 @@
             }
             catch
             {
-                // not throw out of background loop
+                // do not throw out of background loop
             }
         }
 
