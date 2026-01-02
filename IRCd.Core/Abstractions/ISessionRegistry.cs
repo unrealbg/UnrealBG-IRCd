@@ -4,8 +4,12 @@
 
     public interface ISessionRegistry
     {
-        bool TryGetSession(string connectionId, out IClientSession? session);
+        void Add(IClientSession session);
 
-        IReadOnlyCollection<IClientSession> GetAll();
+        void Remove(string connectionId);
+
+        bool TryGet(string connectionId, out IClientSession? session);
+
+        IEnumerable<IClientSession> All();
     }
 }
