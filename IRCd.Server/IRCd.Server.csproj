@@ -18,4 +18,10 @@
 		<ProjectReference Include="..\IRCd.Transport\IRCd.Transport.csproj" />
 	</ItemGroup>
 
+	<ItemGroup>
+	  <None Update="motd.txt">
+	    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	  </None>
+	</ItemGroup>
+
 </Project>

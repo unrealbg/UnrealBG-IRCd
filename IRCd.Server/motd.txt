@@ -1,0 +1,2 @@
+﻿Welcome to UnrealBG IRCd
+Be nice. No flooding.
