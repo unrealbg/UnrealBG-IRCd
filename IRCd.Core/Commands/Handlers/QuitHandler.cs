@@ -16,10 +16,12 @@
         public string Command => "QUIT";
 
         private readonly RoutingService _routing;
+        private readonly ServerLinkService _links;
 
-        public QuitHandler(RoutingService routing)
+        public QuitHandler(RoutingService routing, ServerLinkService links)
         {
             _routing = routing;
+            _links = links;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -61,6 +63,11 @@
                 foreach (var connId in recipients)
                 {
                     await _routing.SendToUserAsync(connId, quitLine, ct);
+                }
+
+                if (state.TryGetUser(session.ConnectionId, out var u) && u is not null && !string.IsNullOrWhiteSpace(u.Uid))
+                {
+                    await _links.PropagateQuitAsync(u.Uid!, reason, ct);
                 }
             }
 

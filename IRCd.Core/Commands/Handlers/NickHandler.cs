@@ -11,11 +11,15 @@
         public string Command => "NICK";
         private readonly RoutingService _routing;
         private readonly RegistrationService _registration;
+        private readonly ServerLinkService _links;
+        private readonly Microsoft.Extensions.Options.IOptions<IRCd.Shared.Options.IrcOptions> _options;
 
-        public NickHandler(RoutingService routing, RegistrationService registration)
+        public NickHandler(RoutingService routing, RegistrationService registration, ServerLinkService links, Microsoft.Extensions.Options.IOptions<IRCd.Shared.Options.IrcOptions> options)
         {
             _routing = routing;
             _registration = registration;
+            _links = links;
+            _options = options;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -51,6 +55,14 @@
             session.Nick = newNick;
             await _registration.TryCompleteRegistrationAsync(session, state, ct);
 
+            if (state.TryGetUser(session.ConnectionId, out var u) && u is not null && string.IsNullOrWhiteSpace(u.Uid))
+            {
+                var sid = _options.Value.ServerInfo?.Sid ?? "001";
+                u.Uid = $"{sid}{session.ConnectionId[..Math.Min(6, session.ConnectionId.Length)].ToUpperInvariant()}";
+                u.RemoteSid = sid;
+                u.IsRemote = false;
+            }
+
             if (string.IsNullOrWhiteSpace(oldNick))
             {
                 return;
@@ -67,6 +79,12 @@
             }
 
             await session.SendAsync(nickLine, ct);
+
+            if (state.TryGetUser(session.ConnectionId, out var meUser) && meUser is not null && !string.IsNullOrWhiteSpace(meUser.Uid))
+            {
+                meUser.NickTs = ChannelTimestamps.NowTs();
+                await _links.PropagateNickAsync(meUser.Uid!, newNick, ct);
+            }
         }
     }
 }

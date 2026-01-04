@@ -47,8 +47,9 @@
             }
 
             var userName = string.IsNullOrWhiteSpace(targetUser.UserName) ? "u" : targetUser.UserName!;
-            var host = "localhost";
+            var host = state.GetHostFor(targetConn);
             var realName = string.IsNullOrWhiteSpace(targetUser.RealName) ? "Unknown" : targetUser.RealName!;
+
             await session.SendAsync($":server 311 {me} {targetUser.Nick} {userName} {host} * :{realName}", ct);
 
             await session.SendAsync($":server 312 {me} {targetUser.Nick} server :IRCd (.NET)", ct);
@@ -63,15 +64,11 @@
 
             var connectedAt = targetUser.ConnectedAtUtc;
             if (connectedAt == default)
-            {
                 connectedAt = now;
-            }
 
             var lastActivity = targetUser.LastActivityUtc;
             if (lastActivity == default)
-            {
                 lastActivity = connectedAt;
-            }
 
             var idleSeconds = (long)Math.Max(0, (now - lastActivity).TotalSeconds);
 
@@ -89,14 +86,10 @@
             foreach (var ch in state.GetAllChannels())
             {
                 if (!ch.Contains(targetConnId))
-                {
                     continue;
-                }
 
                 if (ch.Modes.HasFlag(ChannelModes.Secret) && !ch.Contains(requesterConnId))
-                {
                     continue;
-                }
 
                 var priv = ch.GetPrivilege(targetConnId);
                 var pfx = priv.ToPrefix();

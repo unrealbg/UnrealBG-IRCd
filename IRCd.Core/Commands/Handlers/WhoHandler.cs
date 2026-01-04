@@ -58,18 +58,20 @@
             foreach (var m in channel.Members.OrderBy(x => x.Nick, System.StringComparer.OrdinalIgnoreCase))
             {
                 if (!state.TryGetUser(m.ConnectionId, out var u) || u is null)
-                {
                     continue;
-                }
 
                 var userName = u.UserName ?? "u";
                 var nick = u.Nick ?? m.Nick;
                 var realName = u.RealName ?? "Unknown";
 
+                var host = state.GetHostFor(m.ConnectionId);
+
                 var pfx = m.Privilege.ToPrefix();
                 var flags = pfx is null ? "H" : "H" + pfx;
 
-                await session.SendAsync($":server 352 {me} {channelName} {userName} localhost server {nick} {flags} :0 {realName}", ct);
+                await session.SendAsync(
+                    $":server 352 {me} {channelName} {userName} {host} server {nick} {flags} :0 {realName}",
+                    ct);
             }
 
             await session.SendAsync($":server 315 {me} {channelName} :End of /WHO list.", ct);
@@ -99,8 +101,10 @@
 
             var flags = "H";
 
+            var host = state.GetHostFor(conn);
+
             await session.SendAsync(
-                $":server 352 {me} {channelName} {user.UserName ?? "u"} localhost server {user.Nick ?? nick} {flags} :0 {user.RealName ?? "Unknown"}",
+                $":server 352 {me} {channelName} {user.UserName ?? "u"} {host} server {user.Nick ?? nick} {flags} :0 {user.RealName ?? "Unknown"}",
                 ct);
 
             await session.SendAsync($":server 315 {me} {nick} :End of /WHO list.", ct);

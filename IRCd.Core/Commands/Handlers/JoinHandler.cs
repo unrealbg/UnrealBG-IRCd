@@ -1,5 +1,7 @@
 ﻿namespace IRCd.Core.Commands.Handlers
 {
+    using System;
+    using System.Collections.Generic;
     using System.Linq;
     using System.Threading;
     using System.Threading.Tasks;
@@ -15,10 +17,12 @@
         public string Command => "JOIN";
 
         private readonly RoutingService _routing;
+        private readonly ServerLinkService _links;
 
-        public JoinHandler(RoutingService routing)
+        public JoinHandler(RoutingService routing, ServerLinkService links)
         {
             _routing = routing;
+            _links = links;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -35,12 +39,36 @@
                 return;
             }
 
-            var channelName = msg.Params[0];
-            var providedKey = msg.Params.Count > 1 ? msg.Params[1] : null;
+            var chanToken = msg.Params[0]?.Trim();
+            if (string.IsNullOrWhiteSpace(chanToken))
+            {
+                await session.SendAsync($":server 461 {session.Nick} JOIN :Not enough parameters", ct);
+                return;
+            }
+
+            var keyToken = msg.Params.Count > 1 ? msg.Params[1]?.Trim() : null;
+
+            var channels = chanToken.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var keys = string.IsNullOrWhiteSpace(keyToken)
+                ? Array.Empty<string>()
+                : keyToken.Split(',', StringSplitOptions.TrimEntries);
+
+            for (int i = 0; i < channels.Length; i++)
+            {
+                var channelName = channels[i];
+                var providedKey = i < keys.Length ? keys[i] : null;
+
+                await JoinOneAsync(session, state, channelName, providedKey, ct);
+            }
+        }
+
+        private async ValueTask JoinOneAsync(IClientSession session, ServerState state, string channelName, string? providedKey, CancellationToken ct)
+        {
+            var nick = session.Nick!;
 
             if (!channelName.StartsWith('#'))
             {
-                await session.SendAsync($":server 479 {session.Nick} {channelName} :Illegal channel name", ct);
+                await session.SendAsync($":server 479 {nick} {channelName} :Illegal channel name", ct);
                 return;
             }
 
@@ -48,13 +76,13 @@
             {
                 var maskUserName = session.UserName ?? "u";
                 var host = "localhost";
-                var maskValue = $"{session.Nick}!{maskUserName}@{host}";
+                var maskValue = $"{nick}!{maskUserName}@{host}";
 
                 foreach (var ban in existing.Bans)
                 {
                     if (MaskMatcher.IsMatch(ban.Mask, maskValue))
                     {
-                        await session.SendAsync($":server 474 {session.Nick} {channelName} :Cannot join channel (+b)", ct);
+                        await session.SendAsync($":server 474 {nick} {channelName} :Cannot join channel (+b)", ct);
                         return;
                     }
                 }
@@ -62,26 +90,25 @@
                 if (existing.Modes.HasFlag(ChannelModes.Limit) && existing.UserLimit.HasValue &&
                     existing.Members.Count >= existing.UserLimit.Value)
                 {
-                    await session.SendAsync($":server 471 {session.Nick} {channelName} :Cannot join channel (+l)", ct);
+                    await session.SendAsync($":server 471 {nick} {channelName} :Cannot join channel (+l)", ct);
                     return;
                 }
 
                 if (existing.Modes.HasFlag(ChannelModes.InviteOnly) &&
-                    !existing.IsInvited(session.Nick!))
+                    !existing.IsInvited(nick))
                 {
-                    await session.SendAsync($":server 473 {session.Nick} {channelName} :Cannot join channel (+i)", ct);
+                    await session.SendAsync($":server 473 {nick} {channelName} :Cannot join channel (+i)", ct);
                     return;
                 }
 
                 if (existing.Modes.HasFlag(ChannelModes.Key) &&
-                    !string.Equals(existing.Key, providedKey))
+                    !string.Equals(existing.Key, providedKey, StringComparison.Ordinal))
                 {
-                    await session.SendAsync($":server 475 {session.Nick} {channelName} :Cannot join channel (+k)", ct);
+                    await session.SendAsync($":server 475 {nick} {channelName} :Cannot join channel (+k)", ct);
                     return;
                 }
             }
 
-            var nick = session.Nick!;
             if (!state.TryJoinChannel(session.ConnectionId, nick, channelName))
             {
                 return;
@@ -95,9 +122,13 @@
             channel.RemoveInvite(nick);
 
             var userName = session.UserName ?? "u";
-            var joinLine = $":{nick}!{userName}@localhost JOIN {channelName}";
-
+            var joinLine = $":{nick}!{userName}@localhost JOIN :{channelName}";
             await _routing.BroadcastToChannelAsync(channel, joinLine, excludeConnectionId: null, ct);
+
+            if (state.TryGetUser(session.ConnectionId, out var u) && u is not null && !string.IsNullOrWhiteSpace(u.Uid))
+            {
+                await _links.PropagateJoinAsync(u.Uid!, channelName, ct);
+            }
 
             if (string.IsNullOrWhiteSpace(channel.Topic))
             {
@@ -114,18 +145,60 @@
         private static async ValueTask SendNamesAsync(IClientSession session, Channel channel, CancellationToken ct)
         {
             var me = session.Nick!;
+            var channelName = channel.Name;
 
             var names = channel.Members
                 .OrderByDescending(m => m.Privilege)
-                .ThenBy(m => m.Nick, System.StringComparer.OrdinalIgnoreCase)
+                .ThenBy(m => m.Nick, StringComparer.OrdinalIgnoreCase)
                 .Select(m =>
                 {
                     var p = m.Privilege.ToPrefix();
                     return p is null ? m.Nick : $"{p}{m.Nick}";
-                });
+                })
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToList();
 
-            await session.SendAsync($":server 353 {me} = {channel.Name} :{string.Join(' ', names)}", ct);
-            await session.SendAsync($":server 366 {me} {channel.Name} :End of /NAMES list.", ct);
+            const int maxPayloadChars = 400;
+
+            if (names.Count == 0)
+            {
+                await session.SendAsync($":server 353 {me} = {channelName} :", ct);
+                await session.SendAsync($":server 366 {me} {channelName} :End of /NAMES list.", ct);
+                return;
+            }
+
+            var current = new List<string>();
+            var len = 0;
+
+            foreach (var n in names)
+            {
+                if (current.Count == 0)
+                {
+                    current.Add(n);
+                    len = n.Length;
+                    continue;
+                }
+
+                if (len + 1 + n.Length > maxPayloadChars)
+                {
+                    await session.SendAsync($":server 353 {me} = {channelName} :{string.Join(' ', current)}", ct);
+                    current.Clear();
+                    current.Add(n);
+                    len = n.Length;
+                }
+                else
+                {
+                    current.Add(n);
+                    len += 1 + n.Length;
+                }
+            }
+
+            if (current.Count > 0)
+            {
+                await session.SendAsync($":server 353 {me} = {channelName} :{string.Join(' ', current)}", ct);
+            }
+
+            await session.SendAsync($":server 366 {me} {channelName} :End of /NAMES list.", ct);
         }
     }
 }

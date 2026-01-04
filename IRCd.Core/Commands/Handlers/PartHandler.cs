@@ -10,8 +10,13 @@
     {
         public string Command => "PART";
         private readonly RoutingService _routing;
+        private readonly ServerLinkService _links;
 
-        public PartHandler(RoutingService routing) => _routing = routing;
+        public PartHandler(RoutingService routing, ServerLinkService links)
+        {
+            _routing = routing;
+            _links = links;
+        }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
@@ -39,6 +44,11 @@
             var nick = session.Nick!;
             var partLine = $":{nick}!{session.UserName ?? "u"}@localhost PART {channelName}";
             await _routing.BroadcastToChannelAsync(channel, partLine, excludeConnectionId: null, ct);
+
+            if (state.TryGetUser(session.ConnectionId, out var u) && u is not null && !string.IsNullOrWhiteSpace(u.Uid))
+            {
+                await _links.PropagatePartAsync(u.Uid!, channelName, msg.Trailing ?? "", ct);
+            }
         }
     }
 }
