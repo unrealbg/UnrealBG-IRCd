@@ -27,6 +27,16 @@
                 : "localhost";
         }
 
+        public void TrySetNextHopBySid(string sid, string connectionId)
+        {
+            if (string.IsNullOrWhiteSpace(sid) || string.IsNullOrWhiteSpace(connectionId))
+            {
+                return;
+            }
+
+            _nextHopBySid[sid] = connectionId;
+        }
+
         public bool TryRegisterRemoteServer(RemoteServer server)
         {
             if (string.IsNullOrWhiteSpace(server.Sid) || string.IsNullOrWhiteSpace(server.Name) || string.IsNullOrWhiteSpace(server.ConnectionId))
@@ -64,8 +74,74 @@
             }
         }
 
+        public IReadOnlyCollection<RemoteServer> RemoveRemoteServerTreeByConnection(string connectionId)
+        {
+            var roots = _serversBySid.Values
+                .Where(s => string.Equals(s.ConnectionId, connectionId, StringComparison.OrdinalIgnoreCase) && (s.ParentSid is null || !string.Equals(s.ParentSid, s.Sid, StringComparison.OrdinalIgnoreCase)))
+                .ToArray();
+
+            if (roots.Length == 0)
+            {
+                return Array.Empty<RemoteServer>();
+            }
+
+            var snapshot = _serversBySid.Values.ToArray();
+            var childrenByParent = snapshot
+                .Where(s => !string.IsNullOrWhiteSpace(s.ParentSid) && !string.IsNullOrWhiteSpace(s.Sid))
+                .GroupBy(s => s.ParentSid!, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.Select(x => x.Sid).ToArray(), StringComparer.OrdinalIgnoreCase);
+
+            var removed = new List<RemoteServer>();
+            var toRemove = new Queue<string>();
+            foreach (var r in roots)
+            {
+                if (!string.IsNullOrWhiteSpace(r.Sid))
+                {
+                    toRemove.Enqueue(r.Sid);
+                }
+            }
+
+            while (toRemove.Count > 0)
+            {
+                var sid = toRemove.Dequeue();
+
+                if (_serversBySid.TryRemove(sid, out var srv) && srv is not null)
+                {
+                    removed.Add(srv);
+                    _nextHopBySid.TryRemove(srv.Sid, out _);
+
+                    if (!string.IsNullOrWhiteSpace(srv.ConnectionId))
+                    {
+                        _serversByConn.TryRemove(srv.ConnectionId, out _);
+                    }
+                }
+
+                if (childrenByParent.TryGetValue(sid, out var children))
+                {
+                    foreach (var childSid in children)
+                    {
+                        if (!string.IsNullOrWhiteSpace(childSid))
+                        {
+                            toRemove.Enqueue(childSid);
+                        }
+                    }
+                }
+            }
+
+            var removedSet = new HashSet<string>(removed.Select(r => r.Sid), StringComparer.OrdinalIgnoreCase);
+            foreach (var u in _usersByConn.Values.Where(u => u.IsRemote && !string.IsNullOrWhiteSpace(u.RemoteSid) && removedSet.Contains(u.RemoteSid!)).ToArray())
+            {
+                RemoveUser(u.ConnectionId);
+            }
+
+            return removed;
+        }
+
         public bool TryGetRemoteServerByConnection(string connectionId, out RemoteServer? server)
             => _serversByConn.TryGetValue(connectionId, out server);
+
+        public bool TryGetRemoteServerBySid(string sid, out RemoteServer? server)
+            => _serversBySid.TryGetValue(sid, out server);
 
         public IReadOnlyCollection<RemoteServer> GetRemoteServers()
             => _serversBySid.Values.ToArray();
@@ -108,6 +184,11 @@
         {
             if (string.IsNullOrWhiteSpace(user.Uid) || string.IsNullOrWhiteSpace(user.Nick))
                 return false;
+
+            if (_usersByUid.ContainsKey(user.Uid!))
+            {
+                return false;
+            }
 
             if (!_nickToConn.TryAdd(user.Nick!, user.ConnectionId))
             {
@@ -191,14 +272,19 @@
         public bool TryJoinChannel(string connectionId, string nick, string channelName)
         {
             var channel = GetOrCreateChannel(channelName);
-            if (channel.Contains(connectionId)) return false;
+            if (channel.Contains(connectionId))
+            {
+                return false;
+            }
 
             var priv = !channel.Members.Any()
                 ? ChannelPrivilege.Owner
                 : ChannelPrivilege.Normal;
 
             if (!channel.TryAddMember(connectionId, nick, priv))
+            {
                 return false;
+            }
 
             var set = _userChannels.GetOrAdd(connectionId, _ => new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase));
             set[channelName] = 0;
