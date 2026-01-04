@@ -22,6 +22,8 @@
 
         public string? Host { get; set; }
 
+        public bool IsSecureConnection { get; set; }
+
         public bool IsRegistered { get; set; }
 
         public UserModes Modes { get; set; } = UserModes.None;
