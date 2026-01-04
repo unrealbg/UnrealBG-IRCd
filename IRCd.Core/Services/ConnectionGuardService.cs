@@ -16,6 +16,8 @@
 
         private readonly ConcurrentDictionary<IPAddress, int> _unregisteredCounts = new();
 
+        private readonly ConcurrentDictionary<IPAddress, int> _activeCounts = new();
+
         public ConnectionGuardService(IOptionsMonitor<IrcOptions> options)
         {
             _options = options;
@@ -40,10 +42,19 @@
                 return false;
             }
 
+            var active = _activeCounts.AddOrUpdate(ip, 1, (_, v) => v + 1);
+            if (active > cfg.MaxActiveConnectionsPerIp)
+            {
+                _activeCounts.AddOrUpdate(ip, 0, (_, v) => Math.Max(0, v - 1));
+                rejectReason = cfg.RejectMessage;
+                return false;
+            }
+
             var current = _unregisteredCounts.AddOrUpdate(ip, 1, (_, v) => v + 1);
             if (current > cfg.MaxUnregisteredPerIp)
             {
                 _unregisteredCounts.AddOrUpdate(ip, 0, (_, v) => Math.Max(0, v - 1));
+                _activeCounts.AddOrUpdate(ip, 0, (_, v) => Math.Max(0, v - 1));
 
                 rejectReason = cfg.RejectMessage;
                 return false;
@@ -61,6 +72,17 @@
                 return;
 
             _unregisteredCounts.AddOrUpdate(ip, 0, (_, v) => Math.Max(0, v - 1));
+        }
+
+        /// <summary>
+        /// Call when a session closes/disconnects (registered or unregistered).
+        /// </summary>
+        public void ReleaseActive(IPAddress ip)
+        {
+            if (!Enabled)
+                return;
+
+            _activeCounts.AddOrUpdate(ip, 0, (_, v) => Math.Max(0, v - 1));
         }
 
         /// <summary>
