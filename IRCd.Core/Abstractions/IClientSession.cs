@@ -8,9 +8,15 @@
 
         EndPoint RemoteEndPoint { get; }
 
+        bool IsSecureConnection { get; }
+
+        ISet<string> EnabledCapabilities { get; }
+
         string? Nick { get; set; }
 
         string? UserName { get; set; }
+
+        bool PassAccepted { get; set; }
 
         bool IsRegistered { get; set; }
 
