@@ -112,7 +112,6 @@
             }
         }
 
-
         public void OnInboundLine()
         {
             LastActivityUtc = DateTime.UtcNow;

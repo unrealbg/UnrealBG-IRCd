@@ -26,6 +26,7 @@
         private readonly ServerState _state;
         private readonly IOptions<IrcOptions> _options;
         private readonly ISessionRegistry _sessions;
+        private readonly HostmaskService _hostmask;
 
         private readonly ConnectionGuardService _guard;
 
@@ -40,7 +41,8 @@
             IOptions<IrcOptions> options,
             ISessionRegistry sessions,
             ConnectionGuardService guard,
-            RoutingService routing)
+            RoutingService routing,
+            HostmaskService hostmask)
         {
             _logger = logger;
             _dispatcher = dispatcher;
@@ -49,12 +51,15 @@
             _sessions = sessions;
             _guard = guard;
             _routing = routing;
+            _hostmask = hostmask;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             var ip = IPAddress.Any;
-            var port = _options.Value.IrcPort;
+            var port = _options.Value.Listen?.ClientPort > 0
+                ? _options.Value.Listen.ClientPort
+                : _options.Value.IrcPort;
 
             _listener = new TcpListener(ip, port);
             _listener.Start();
@@ -125,7 +130,17 @@
             var connectionId = Guid.NewGuid().ToString("N");
             var session = new TcpClientSession(connectionId, client);
 
-            _state.TryAddUser(new User { ConnectionId = connectionId });
+            var now = DateTimeOffset.UtcNow;
+            var host = _hostmask.GetDisplayedHost(remoteIp);
+
+            _state.TryAddUser(new User
+            {
+                ConnectionId = connectionId,
+                ConnectedAtUtc = now,
+                LastActivityUtc = now,
+                Host = host
+            });
+
             _sessions.Add(session);
 
             _logger.LogInformation("Client connected {ConnId} from {Remote}", connectionId, session.RemoteEndPoint);
@@ -225,9 +240,14 @@
                     {
                         var nick = session.Nick!;
                         var user = session.UserName ?? "u";
-                        var host = "localhost";
+                        var displayedHost = "localhost";
 
-                        var quitLine = $":{nick}!{user}@{host} QUIT :Client disconnected";
+                        if (_state.TryGetUser(connectionId, out var u) && u is not null && !string.IsNullOrWhiteSpace(u.Host))
+                        {
+                            displayedHost = u.Host!;
+                        }
+
+                        var quitLine = $":{nick}!{user}@{displayedHost} QUIT :Client disconnected";
 
                         var recipients = new HashSet<string>(StringComparer.Ordinal);
 
