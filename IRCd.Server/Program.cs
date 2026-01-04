@@ -100,11 +100,17 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IIrcCommandHandler, KickBanHandler>();
         services.AddSingleton<IIrcCommandHandler, InviteHandler>();
         services.AddSingleton<IIrcCommandHandler, ListHandler>();
+        services.AddSingleton<IIrcCommandHandler, AwayHandler>();
+        services.AddSingleton<IIrcCommandHandler, IsonHandler>();
+        services.AddSingleton<IIrcCommandHandler, TimeHandler>();
+        services.AddSingleton<IIrcCommandHandler, VersionHandler>();
+        services.AddSingleton<IIrcCommandHandler, AdminHandler>();
         services.AddSingleton<IIrcCommandHandler, MotdHandler>();
         services.AddSingleton<IIrcCommandHandler, LinksHandler>();
         services.AddSingleton<IIrcCommandHandler, LusersHandler>();
         services.AddSingleton<IIrcCommandHandler, UserhostHandler>();
         services.AddSingleton<IIrcCommandHandler, PongHandler>();
+        services.AddSingleton<IIrcCommandHandler, OperHandler>();
 
         services.AddSingleton<CommandDispatcher>();
 
