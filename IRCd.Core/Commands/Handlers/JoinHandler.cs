@@ -81,7 +81,7 @@
         {
             var nick = session.Nick!;
 
-            if (!channelName.StartsWith('#'))
+            if (!IrcValidation.IsValidChannel(channelName, out _))
             {
                 await session.SendAsync($":server 479 {nick} {channelName} :Illegal channel name", ct);
                 return;

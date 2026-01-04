@@ -38,15 +38,17 @@
             }
 
             var channelName = msg.Params[0]?.Trim();
-            if (string.IsNullOrWhiteSpace(channelName) || !channelName.StartsWith("#", StringComparison.Ordinal))
+            if (!IrcValidation.IsValidChannel(channelName, out _))
             {
-                await session.SendAsync($":server 403 {session.Nick} {channelName ?? "*"} :No such channel", ct);
+                await session.SendAsync($":server 403 {session.Nick} {(string.IsNullOrWhiteSpace(channelName) ? "*" : channelName)} :No such channel", ct);
                 return;
             }
 
-            if (!state.TryGetChannel(channelName, out var channel) || channel is null)
+            var channelNameNN = channelName!;
+
+            if (!state.TryGetChannel(channelNameNN, out var channel) || channel is null)
             {
-                await session.SendAsync($":server 403 {session.Nick} {channelName} :No such channel", ct);
+                await session.SendAsync($":server 403 {session.Nick} {channelNameNN} :No such channel", ct);
                 return;
             }
 
@@ -55,7 +57,7 @@
 
             if (channel.Modes.HasFlag(ChannelModes.Secret) && !isMember)
             {
-                await session.SendAsync($":server 403 {me} {channelName} :No such channel", ct);
+                await session.SendAsync($":server 403 {me} {channelNameNN} :No such channel", ct);
                 return;
             }
 
@@ -63,16 +65,16 @@
             {
                 if (string.IsNullOrWhiteSpace(channel.Topic))
                 {
-                    await session.SendAsync($":server 331 {me} {channelName} :No topic is set", ct);
+                    await session.SendAsync($":server 331 {me} {channelNameNN} :No topic is set", ct);
                 }
                 else
                 {
-                    await session.SendAsync($":server 332 {me} {channelName} :{channel.Topic}", ct);
+                    await session.SendAsync($":server 332 {me} {channelNameNN} :{channel.Topic}", ct);
 
                     if (!string.IsNullOrWhiteSpace(channel.TopicSetBy) && channel.TopicSetAtUtc.HasValue)
                     {
                         await session.SendAsync(
-                            $":server 333 {me} {channelName} {channel.TopicSetBy} {channel.TopicTs}",
+                            $":server 333 {me} {channelNameNN} {channel.TopicSetBy} {channel.TopicTs}",
                             ct);
                     }
                 }
@@ -82,13 +84,13 @@
 
             if (!isMember)
             {
-                await session.SendAsync($":server 442 {me} {channelName} :You're not on that channel", ct);
+                await session.SendAsync($":server 442 {me} {channelNameNN} :You're not on that channel", ct);
                 return;
             }
 
             if (channel.Modes.HasFlag(ChannelModes.TopicOpsOnly) && !channel.HasPrivilege(session.ConnectionId, ChannelPrivilege.Op))
             {
-                await session.SendAsync($":server 482 {me} {channelName} :You're not channel operator", ct);
+                await session.SendAsync($":server 482 {me} {channelNameNN} :You're not channel operator", ct);
                 return;
             }
 
@@ -101,12 +103,12 @@
             var setBy = $"{me}!{(session.UserName ?? "u")}@localhost";
             channel.TrySetTopicWithTs(newTopic, setBy, ChannelTimestamps.NowTs());
 
-            var topicLine = $":{setBy} TOPIC {channelName} :{channel.Topic ?? string.Empty}";
+            var topicLine = $":{setBy} TOPIC {channelNameNN} :{channel.Topic ?? string.Empty}";
             await _routing.BroadcastToChannelAsync(channel, topicLine, excludeConnectionId: null, ct);
 
             if (state.TryGetUser(session.ConnectionId, out var u) && u is not null && !string.IsNullOrWhiteSpace(u.Uid))
             {
-                await _links.PropagateTopicAsync(u.Uid!, channelName, channel.Topic, ct);
+                await _links.PropagateTopicAsync(u.Uid!, channelNameNN, channel.Topic, ct);
             }
         }
     }

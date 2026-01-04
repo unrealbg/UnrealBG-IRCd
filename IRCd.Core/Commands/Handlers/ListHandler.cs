@@ -10,9 +10,20 @@
     using IRCd.Core.Protocol;
     using IRCd.Core.State;
 
+    using IRCd.Shared.Options;
+
+    using Microsoft.Extensions.Options;
+
     public sealed class ListHandler : IIrcCommandHandler
     {
         public string Command => "LIST";
+
+        private readonly IOptions<IrcOptions> _options;
+
+        public ListHandler(IOptions<IrcOptions> options)
+        {
+            _options = options;
+        }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
@@ -29,8 +40,12 @@
             string[]? requested = null;
             if (msg.Params.Count > 0 && !string.IsNullOrWhiteSpace(msg.Params[0]))
             {
+                var max = _options.Value.Limits?.MaxListTargets > 0 ? _options.Value.Limits.MaxListTargets : 20;
                 requested = msg.Params[0]
-                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Where(n => IrcValidation.IsValidChannel(n, out _))
+                    .Take(max)
+                    .ToArray();
             }
 
             foreach (var ch in state.GetAllChannels())

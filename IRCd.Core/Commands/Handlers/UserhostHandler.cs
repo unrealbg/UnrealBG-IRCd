@@ -10,9 +10,20 @@
     using IRCd.Core.Protocol;
     using IRCd.Core.State;
 
+    using IRCd.Shared.Options;
+
+    using Microsoft.Extensions.Options;
+
     public sealed class UserhostHandler : IIrcCommandHandler
     {
         public string Command => "USERHOST";
+
+        private readonly IOptions<IrcOptions> _options;
+
+        public UserhostHandler(IOptions<IrcOptions> options)
+        {
+            _options = options;
+        }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
@@ -29,17 +40,23 @@
             }
 
             var me = session.Nick!;
-            var nicks = msg.Params.Take(5).ToArray();
+            var max = _options.Value.Limits?.MaxUserhostTargets > 0 ? _options.Value.Limits.MaxUserhostTargets : 10;
+            var nicks = msg.Params.Take(max).ToArray();
 
             var results = new List<string>(nicks.Length);
 
             foreach (var nick in nicks)
             {
+                if (!IrcValidation.IsValidNick(nick, out _))
+                {
+                    continue;
+                }
+
                 if (state.TryGetConnectionIdByNick(nick, out var connId) && connId is not null
                     && state.TryGetUser(connId, out var user) && user is not null)
                 {
                     var u = string.IsNullOrWhiteSpace(user.UserName) ? "u" : user.UserName!;
-                    var host = "localhost";
+                    var host = state.GetHostFor(connId);
 
                     results.Add($"{user.Nick}=+{u}@{host}");
                 }

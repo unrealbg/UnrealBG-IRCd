@@ -35,7 +35,7 @@
                 return;
             }
 
-            if (newNick.Length > 20 || newNick.Contains(' ') || newNick.Contains(':'))
+            if (!IrcValidation.IsValidNick(newNick, out _))
             {
                 await session.SendAsync($":server 432 * {newNick} :Erroneous nickname", ct);
                 return;
