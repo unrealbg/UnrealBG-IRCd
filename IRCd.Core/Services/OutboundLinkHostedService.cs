@@ -23,6 +23,8 @@ namespace IRCd.Core.Services
         private readonly IOptionsMonitor<IrcOptions> _options;
         private readonly ServerLinkService _linkService;
 
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _failures = new(StringComparer.OrdinalIgnoreCase);
+
         public OutboundLinkHostedService(
             ILogger<OutboundLinkHostedService> logger,
             IOptionsMonitor<IrcOptions> options,
@@ -46,11 +48,26 @@ namespace IRCd.Core.Services
                     if (stoppingToken.IsCancellationRequested)
                         break;
 
+                    var delay = GetBackoffDelaySeconds(link);
+                    if (delay > 0)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(delay), stoppingToken);
+                    }
+
                     await TryConnectOnceAsync(link, stoppingToken);
                 }
 
                 await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
             }
+        }
+
+        private int GetBackoffDelaySeconds(LinkOptions link)
+        {
+            if (!_failures.TryGetValue(link.Name, out var n) || n <= 0)
+                return 0;
+
+            var s = Math.Min(30, 1 << Math.Min(4, n - 1));
+            return s;
         }
 
         private async Task TryConnectOnceAsync(LinkOptions link, CancellationToken ct)
@@ -69,6 +86,8 @@ namespace IRCd.Core.Services
                 };
 
                 await _linkService.HandleOutboundLinkAsync(session, link, ct);
+
+                _failures[link.Name] = 0;
             }
             catch (OperationCanceledException)
             {
@@ -76,6 +95,7 @@ namespace IRCd.Core.Services
             }
             catch (Exception ex)
             {
+                _failures.AddOrUpdate(link.Name, 1, (_, v) => Math.Min(v + 1, 10));
                 _logger.LogDebug(ex, "S2S outbound connect failed to {Name} {Host}:{Port}", link.Name, link.Host, link.Port);
             }
         }
@@ -103,11 +123,12 @@ namespace IRCd.Core.Services
 
                 RemoteEndPoint = client.Client.RemoteEndPoint ?? new IPEndPoint(IPAddress.None, 0);
 
-                _outgoing = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+                _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(2048)
                 {
                     SingleReader = true,
                     SingleWriter = false,
-                    AllowSynchronousContinuations = true
+                    AllowSynchronousContinuations = true,
+                    FullMode = BoundedChannelFullMode.DropOldest
                 });
             }
 
@@ -132,7 +153,10 @@ namespace IRCd.Core.Services
                 if (Volatile.Read(ref _closed) == 1)
                     return ValueTask.CompletedTask;
 
-                _outgoing.Writer.TryWrite(line);
+                if (!_outgoing.Writer.TryWrite(line))
+                {
+                    _ = CloseAsync("Send queue overflow", ct);
+                }
                 return ValueTask.CompletedTask;
             }
 

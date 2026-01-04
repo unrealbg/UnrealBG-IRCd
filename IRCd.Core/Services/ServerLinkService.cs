@@ -24,6 +24,8 @@ namespace IRCd.Core.Services
 
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _seen = new(StringComparer.Ordinal);
 
+        private readonly LinkFloodGate _floodGate = new(maxLines: 200, window: TimeSpan.FromSeconds(10));
+
         public ServerLinkService(ILogger<ServerLinkService> logger, IOptionsMonitor<IrcOptions> options, ServerState state, RoutingService routing)
         {
             _logger = logger;
@@ -69,6 +71,52 @@ namespace IRCd.Core.Services
         }
 
         private string LocalOriginSid => _options.CurrentValue.ServerInfo?.Sid ?? "001";
+
+        private sealed class LinkFloodGate
+        {
+            private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SlidingWindow> _windows = new(StringComparer.Ordinal);
+            private readonly int _maxLines;
+            private readonly TimeSpan _window;
+
+            public LinkFloodGate(int maxLines, TimeSpan window)
+            {
+                _maxLines = maxLines;
+                _window = window;
+            }
+
+            public bool Allow(string connectionId)
+            {
+                var w = _windows.GetOrAdd(connectionId, _ => new SlidingWindow(_window));
+                return w.Hit(_maxLines);
+            }
+
+            public void Remove(string connectionId) => _windows.TryRemove(connectionId, out _);
+
+            private sealed class SlidingWindow
+            {
+                private readonly TimeSpan _window;
+                private readonly System.Collections.Generic.Queue<DateTimeOffset> _hits = new();
+                private readonly object _lock = new();
+
+                public SlidingWindow(TimeSpan window) => _window = window;
+
+                public bool Hit(int max)
+                {
+                    lock (_lock)
+                    {
+                        var now = DateTimeOffset.UtcNow;
+                        while (_hits.Count > 0 && (now - _hits.Peek()) > _window)
+                            _hits.Dequeue();
+
+                        if (_hits.Count >= max)
+                            return false;
+
+                        _hits.Enqueue(now);
+                        return true;
+                    }
+                }
+            }
+        }
 
         public async Task PropagateJoinAsync(string uid, string channel, CancellationToken ct)
         {
@@ -370,6 +418,18 @@ namespace IRCd.Core.Services
                         break;
                     }
 
+                    if (!_floodGate.Allow(session.ConnectionId))
+                    {
+                        try { await session.SendAsync("ERROR :Excess Flood", ct); } catch { }
+                        break;
+                    }
+
+                    if (!_floodGate.Allow(session.ConnectionId))
+                    {
+                        try { await session.SendAsync("ERROR :Excess Flood", ct); } catch { }
+                        break;
+                    }
+
                     if (!ServerLinkParser.TryParse(line, out var command, out var args, out var trailing))
                     {
                         continue;
@@ -464,8 +524,22 @@ namespace IRCd.Core.Services
             }
             finally
             {
+                try { _floodGate.Remove(session.ConnectionId); } catch { }
                 _linksByConn.TryRemove(session.ConnectionId, out _);
-                _state.RemoveRemoteServerByConnection(session.ConnectionId);
+
+                var removedServers = _state.RemoveRemoteServerTreeByConnection(session.ConnectionId);
+
+                foreach (var srv in removedServers)
+                {
+                    var msgId = NewMsgId();
+                    MarkSeen(msgId);
+                    var originSid = LocalOriginSid;
+                    if (!string.IsNullOrWhiteSpace(srv.Sid))
+                    {
+                        await PropagateRawAsync(session.ConnectionId, $"SQUIT {msgId} {originSid} {srv.Sid} :Connection lost", CancellationToken.None);
+                    }
+                }
+
                 try { await session.CloseAsync("S2S closed", CancellationToken.None); } catch { }
                 try { await writerTask; } catch { }
             }
@@ -573,8 +647,21 @@ namespace IRCd.Core.Services
             }
             finally
             {
+                try { _floodGate.Remove(session.ConnectionId); } catch { }
                 _linksByConn.TryRemove(session.ConnectionId, out _);
-                _state.RemoveRemoteServerByConnection(session.ConnectionId);
+
+                var removedServers = _state.RemoveRemoteServerTreeByConnection(session.ConnectionId);
+                foreach (var srv in removedServers)
+                {
+                    var msgId = NewMsgId();
+                    MarkSeen(msgId);
+                    var originSid = LocalOriginSid;
+                    if (!string.IsNullOrWhiteSpace(srv.Sid))
+                    {
+                        await PropagateRawAsync(session.ConnectionId, $"SQUIT {msgId} {originSid} {srv.Sid} :Connection lost", CancellationToken.None);
+                    }
+                }
+
                 try { await session.CloseAsync("S2S outbound closed", CancellationToken.None); } catch { }
                 try { await writerTask; } catch { }
             }
@@ -682,6 +769,12 @@ namespace IRCd.Core.Services
                     return;
                 }
 
+                if (!_floodGate.Allow(session.ConnectionId))
+                {
+                    try { await session.SendAsync("ERROR :Excess Flood", ct); } catch { }
+                    return;
+                }
+
                 if (!ServerLinkParser.TryParse(line, out var command, out var args, out var trailing))
                 {
                     continue;
@@ -717,6 +810,12 @@ namespace IRCd.Core.Services
                         var sid = args[1];
                         var parentSid = args.Length >= 3 ? args[2] : session.RemoteSid;
 
+                        if (string.IsNullOrWhiteSpace(sid) || string.Equals(sid, parentSid, StringComparison.OrdinalIgnoreCase))
+                        {
+                            await session.SendAsync("ERROR :Bad SERVERLIST", ct);
+                            return;
+                        }
+
                         _state.TryRegisterRemoteServer(new RemoteServer
                         {
                             ConnectionId = session.ConnectionId,
@@ -725,6 +824,34 @@ namespace IRCd.Core.Services
                             Description = trailing ?? string.Empty,
                             ParentSid = parentSid
                         });
+
+                        if (_state.TryGetNextHopBySid(sid, out var existingHop) && existingHop is not null &&
+                            !string.Equals(existingHop, session.ConnectionId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            await session.SendAsync("ERROR :SID collision", ct);
+                            return;
+                        }
+
+                        _state.TrySetNextHopBySid(sid, session.ConnectionId);
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(command, "SQUIT", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (args.Length >= argOffset + 1)
+                    {
+                        var sid = args[argOffset + 0];
+                        if (_state.TryGetNextHopBySid(sid, out var hop) && hop is not null)
+                        {
+                            _state.RemoveRemoteServerTreeByConnection(hop);
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(msgId) && !string.IsNullOrWhiteSpace(originSid))
+                        {
+                            await PropagateRawAsync(session.ConnectionId, $"SQUIT {msgId} {originSid} {sid} :{trailing ?? string.Empty}", ct);
+                        }
                     }
 
                     continue;
@@ -804,11 +931,9 @@ namespace IRCd.Core.Services
                         var secureFlag = args.Length >= 5 ? args[4] : "0";
                         var isSecure = secureFlag == "1";
 
-                        var remoteConnId = $"uid:{uid}";
-
                         var u = new User
                         {
-                            ConnectionId = remoteConnId,
+                            ConnectionId = $"uid:{uid}",
                             Uid = uid,
                             Nick = nick,
                             UserName = userName,
@@ -822,6 +947,12 @@ namespace IRCd.Core.Services
 
                         if (!_state.TryAddRemoteUser(u))
                         {
+                            if (!string.IsNullOrWhiteSpace(u.Uid) && _state.TryGetUserByUid(u.Uid!, out _))
+                            {
+                                await session.SendAsync("ERROR :UID collision", ct);
+                                return;
+                            }
+
                             await ResolveNickCollisionOnAddAsync(session, u, ct);
                         }
                     }
@@ -855,9 +986,16 @@ namespace IRCd.Core.Services
 
                         var ch = _state.GetOrCreateChannel(channelName);
 
+                        var acceptRemote = remoteTs <= ch.CreatedTs;
+
                         if (remoteTs < ch.CreatedTs)
                         {
                             ch.CreatedTs = remoteTs;
+                        }
+
+                        if (!acceptRemote)
+                        {
+                            continue;
                         }
 
                         foreach (var uid in list.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -866,6 +1004,326 @@ namespace IRCd.Core.Services
                             {
                                 _state.TryJoinChannel(u.ConnectionId, u.Nick!, channelName);
                             }
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(command, "MODECH", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!session.UserSyncEnabled)
+                    {
+                        continue;
+                    }
+
+                    if (args.Length >= 3)
+                    {
+                        var channelName = args[0];
+                        if (!long.TryParse(args[1], out var ts))
+                        {
+                            ts = ChannelTimestamps.NowTs();
+                        }
+
+                        var modes = args[2];
+                        var ch = _state.GetOrCreateChannel(channelName);
+
+                        if (ts > ch.CreatedTs)
+                        {
+                            continue;
+                        }
+
+                        if (ts < ch.CreatedTs)
+                        {
+                            ch.CreatedTs = ts;
+                        }
+
+                        var sign = '+';
+                        foreach (var mc in modes)
+                        {
+                            if (mc is '+' or '-')
+                            {
+                                sign = mc;
+                                continue;
+                            }
+
+                            var enable = sign == '+';
+                            switch (mc)
+                            {
+                                case 'n': ch.ApplyModeChange(ChannelModes.NoExternalMessages, enable); break;
+                                case 't': ch.ApplyModeChange(ChannelModes.TopicOpsOnly, enable); break;
+                                case 'i': ch.ApplyModeChange(ChannelModes.InviteOnly, enable); break;
+                                case 'm': ch.ApplyModeChange(ChannelModes.Moderated, enable); break;
+                                case 's': ch.ApplyModeChange(ChannelModes.Secret, enable); break;
+                                default: break;
+                            }
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(command, "CHANMETA", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!session.UserSyncEnabled)
+                    {
+                        continue;
+                    }
+
+                    if (args.Length >= 4)
+                    {
+                        var channelName = args[0];
+                        if (!long.TryParse(args[1], out var ts))
+                        {
+                            ts = ChannelTimestamps.NowTs();
+                        }
+
+                        var key = args[2];
+                        var limit = args[3];
+
+                        var ch = _state.GetOrCreateChannel(channelName);
+                        if (ts > ch.CreatedTs)
+                        {
+                            continue;
+                        }
+
+                        if (ts < ch.CreatedTs)
+                        {
+                            ch.CreatedTs = ts;
+                        }
+
+                        ch.SetKey(string.IsNullOrWhiteSpace(key) ? null : key);
+
+                        if (int.TryParse(limit, out var lim) && lim > 0)
+                        {
+                            ch.SetLimit(lim);
+                        }
+                        else
+                        {
+                            ch.ClearLimit();
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(command, "TOPICSET", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!session.UserSyncEnabled)
+                    {
+                        continue;
+                    }
+
+                    if (args.Length >= 2)
+                    {
+                        var channelName = args[0];
+                        if (!long.TryParse(args[1], out var ts))
+                        {
+                            ts = ChannelTimestamps.NowTs();
+                        }
+
+                        var topic = trailing ?? string.Empty;
+                        var ch = _state.GetOrCreateChannel(channelName);
+
+                        if (ts > ch.CreatedTs)
+                        {
+                            continue;
+                        }
+
+                        if (ts < ch.CreatedTs)
+                        {
+                            ch.CreatedTs = ts;
+                        }
+
+                        ch.TrySetTopicWithTs(topic, setBy: session.RemoteServerName ?? "remote", ts);
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(command, "BAN", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!session.UserSyncEnabled)
+                        continue;
+
+                    if (args.Length >= 5)
+                    {
+                        var channelName = args[0];
+                        if (!long.TryParse(args[1], out var ts))
+                        {
+                            ts = ChannelTimestamps.NowTs();
+                        }
+
+                        var mask = args[2];
+                        var setBy = args[3];
+                        var setAt = long.TryParse(args[4], out var tmp) ? tmp : DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+                        var ch = _state.GetOrCreateChannel(channelName);
+                        if (ts > ch.CreatedTs)
+                        {
+                            continue;
+                        }
+
+                        if (ts < ch.CreatedTs)
+                        {
+                            ch.CreatedTs = ts;
+                        }
+
+                        ch.AddBan(mask, setBy, DateTimeOffset.FromUnixTimeSeconds(setAt));
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(command, "BANDEL", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!session.UserSyncEnabled)
+                    {
+                        continue;
+                    }
+
+                    if (args.Length >= 3)
+                    {
+                        var channelName = args[0];
+                        if (!long.TryParse(args[1], out var ts))
+                        {
+                            ts = ChannelTimestamps.NowTs();
+                        }
+
+                        var mask = args[2];
+
+                        var ch = _state.GetOrCreateChannel(channelName);
+                        if (ts > ch.CreatedTs)
+                        {
+                            continue;
+                        }
+
+                        if (ts < ch.CreatedTs)
+                        {
+                            ch.CreatedTs = ts;
+                        }
+
+                        ch.RemoveBan(mask);
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(command, "MEMBER", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!session.UserSyncEnabled)
+                    {
+                        continue;
+                    }
+
+                    if (args.Length >= 3)
+                    {
+                        var channelName = args[0];
+                        var uid = args[1];
+                        var priv = int.TryParse(args[2], out var p) ? (ChannelPrivilege)p : ChannelPrivilege.Normal;
+
+                        if (_state.TryGetChannel(channelName, out var ch) && ch is not null &&
+                            _state.TryGetUserByUid(uid, out var u) && u is not null)
+                        {
+                            ch.TryUpdateMemberPrivilege(u.ConnectionId, priv);
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(command, "JOIN", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!session.UserSyncEnabled)
+                    {
+                        continue;
+                    }
+
+                    if (args.Length >= argOffset + 2)
+                    {
+                        var uid = args[argOffset + 0];
+                        var channel = args[argOffset + 1];
+
+                        if (_state.TryGetUserByUid(uid, out var u) && u is not null && !string.IsNullOrWhiteSpace(u.Nick))
+                        {
+                            _state.TryJoinChannel(u.ConnectionId, u.Nick!, channel);
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(msgId) && !string.IsNullOrWhiteSpace(originSid))
+                        {
+                            await PropagateRawAsync(session.ConnectionId, $"JOIN {msgId} {originSid} {uid} {channel}", ct);
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(command, "PART", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!session.UserSyncEnabled)
+                    {
+                        continue;
+                    }
+
+                    if (args.Length >= argOffset + 2)
+                    {
+                        var uid = args[argOffset + 0];
+                        var channel = args[argOffset + 1];
+
+                        if (_state.TryGetUserByUid(uid, out var u) && u is not null)
+                        {
+                            _state.TryPartChannel(u.ConnectionId, channel, out _);
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(msgId) && !string.IsNullOrWhiteSpace(originSid))
+                        {
+                            await PropagateRawAsync(session.ConnectionId, $"PART {msgId} {originSid} {uid} {channel} :{trailing ?? string.Empty}", ct);
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(command, "PRIVMSG", StringComparison.OrdinalIgnoreCase) || string.Equals(command, "NOTICE", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!session.UserSyncEnabled)
+                    {
+                        continue;
+                    }
+
+                    if (args.Length >= argOffset + 2)
+                    {
+                        var fromUid = args[argOffset + 0];
+                        var target = args[argOffset + 1];
+                        var text = trailing ?? string.Empty;
+
+                        if (_state.TryGetUserByUid(fromUid, out var fromU) && fromU is not null)
+                        {
+                            var fromNick = fromU.Nick ?? "*";
+                            var fromUser = fromU.UserName ?? "u";
+                            var fromHost = fromU.Host ?? "localhost";
+                            var prefix = $":{fromNick}!{fromUser}@{fromHost}";
+                            var lineOut = $"{prefix} {command.ToUpperInvariant()} {target} :{text}";
+
+                            if (target.StartsWith('#'))
+                            {
+                                if (_state.TryGetChannel(target, out var ch) && ch is not null)
+                                {
+                                    await _routing.BroadcastToChannelAsync(ch, lineOut, excludeConnectionId: null, ct);
+                                }
+                            }
+                            else
+                            {
+                                if (_state.TryGetConnectionIdByNick(target, out var toConn) && toConn is not null)
+                                {
+                                    await _routing.SendToUserAsync(toConn, lineOut, ct);
+                                }
+                            }
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(msgId) && !string.IsNullOrWhiteSpace(originSid))
+                        {
+                            await PropagateRawAsync(session.ConnectionId, $"{command.ToUpperInvariant()} {msgId} {originSid} {fromUid} {target} :{text}", ct);
                         }
                     }
 
