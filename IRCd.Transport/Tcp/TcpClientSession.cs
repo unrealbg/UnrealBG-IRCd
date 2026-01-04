@@ -34,20 +34,17 @@
 
             _stream = _client.GetStream();
 
-            _reader = new StreamReader(_stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: true);
-            _writer = new StreamWriter(_stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), bufferSize: 4096, leaveOpen: true)
-            {
-                NewLine = "\r\n",
-                AutoFlush = true
-            };
+            _reader = LineProtocol.CreateReader(_stream);
+            _writer = LineProtocol.CreateWriter(_stream);
 
             RemoteEndPoint = client.Client.RemoteEndPoint ?? new IPEndPoint(IPAddress.None, 0);
 
-            _outgoing = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+            _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(capacity: 256)
             {
                 SingleReader = true,
                 SingleWriter = false,
-                AllowSynchronousContinuations = true
+                AllowSynchronousContinuations = true,
+                FullMode = BoundedChannelFullMode.DropWrite
             });
 
             LastActivityUtc = DateTime.UtcNow;
@@ -62,9 +59,15 @@
 
         public EndPoint RemoteEndPoint { get; }
 
+        public bool IsSecureConnection => false;
+
+        public ISet<string> EnabledCapabilities { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         public string? Nick { get; set; }
 
         public string? UserName { get; set; }
+
+        public bool PassAccepted { get; set; }
 
         public bool IsRegistered { get; set; }
 
@@ -145,7 +148,10 @@
 
             LastActivityUtc = DateTime.UtcNow;
 
-            _outgoing.Writer.TryWrite(line);
+            if (!_outgoing.Writer.TryWrite(line))
+            {
+                _ = CloseAsync("Send queue overflow", ct);
+            }
             return ValueTask.CompletedTask;
         }
 
@@ -162,10 +168,10 @@
                     return null;
                 }
 
-                const int maxChars = 510;
-                if (line.Length > maxChars)
+                if (line.Length > LineProtocol.MaxLineChars)
                 {
-                    line = line[..maxChars];
+                    await CloseAsync("Input line too long", ct);
+                    return null;
                 }
 
                 return line;
@@ -212,7 +218,6 @@
             }
             catch
             {
-                // do not throw out of background loop
             }
         }
 

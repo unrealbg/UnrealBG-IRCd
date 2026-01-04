@@ -28,6 +28,10 @@
         private readonly ISessionRegistry _sessions;
         private readonly HostmaskService _hostmask;
 
+        private readonly RateLimitService _rateLimit;
+
+        private readonly ServerLinkService _links;
+
         private readonly ConnectionGuardService _guard;
 
         private readonly RoutingService _routing;
@@ -42,7 +46,9 @@
             ISessionRegistry sessions,
             ConnectionGuardService guard,
             RoutingService routing,
-            HostmaskService hostmask)
+            HostmaskService hostmask,
+            RateLimitService rateLimit,
+            ServerLinkService links)
         {
             _logger = logger;
             _dispatcher = dispatcher;
@@ -52,6 +58,8 @@
             _guard = guard;
             _routing = routing;
             _hostmask = hostmask;
+            _rateLimit = rateLimit;
+            _links = links;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -138,7 +146,8 @@
                 ConnectionId = connectionId,
                 ConnectedAtUtc = now,
                 LastActivityUtc = now,
-                Host = host
+                Host = host,
+                IsSecureConnection = false
             });
 
             _sessions.Add(session);
@@ -147,7 +156,8 @@
 
             var writerTask = Task.Run(() => session.RunWriterLoopAsync(ct), ct);
 
-            await session.SendAsync(":server NOTICE * :Welcome. Use NICK/USER.", ct);
+            var serverName = _options.Value.ServerInfo?.Name ?? "server";
+            await session.SendAsync($":{serverName} NOTICE * :Welcome. Use NICK/USER.", ct);
 
             Task<string?>? pendingRead = null;
 
@@ -219,7 +229,7 @@
                         if (_guard.Enabled)
                         {
                             _guard.MarkRegistered(remoteIp);
-                            unregisteredReleased = true; // it's no longer "unregistered"
+                            unregisteredReleased = true;
                         }
                     }
                 }
@@ -267,16 +277,27 @@
                         {
                             await _routing.SendToUserAsync(rid, quitLine, CancellationToken.None);
                         }
+
+                        if (_state.TryGetUser(connectionId, out var meUser) && meUser is not null && !string.IsNullOrWhiteSpace(meUser.Uid))
+                        {
+                            await _links.PropagateQuitAsync(meUser.Uid!, "Client disconnected", CancellationToken.None);
+                        }
                     }
                 }
                 catch { /* ignore */ }
 
                 try { _sessions.Remove(connectionId); } catch { /* ignore */ }
                 try { _state.RemoveUser(connectionId); } catch { /* ignore */ }
+                try { _rateLimit.ClearConnection(connectionId); } catch { /* ignore */ }
 
                 if (_guard.Enabled && !session.IsRegistered && !unregisteredReleased)
                 {
                     try { _guard.ReleaseUnregistered(remoteIp); } catch { /* ignore */ }
+                }
+
+                if (_guard.Enabled)
+                {
+                    try { _guard.ReleaseActive(remoteIp); } catch { /* ignore */ }
                 }
 
                 try { await session.CloseAsync("Client disconnected", CancellationToken.None); } catch { /* ignore */ }
