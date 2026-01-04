@@ -9,10 +9,12 @@
     public sealed class RoutingService
     {
         private readonly ISessionRegistry _sessions;
+        private readonly IRCd.Core.Protocol.IrcFormatter _formatter;
 
-        public RoutingService(ISessionRegistry sessions)
+        public RoutingService(ISessionRegistry sessions, IRCd.Core.Protocol.IrcFormatter formatter)
         {
             _sessions = sessions;
+            _formatter = formatter;
         }
 
         public async ValueTask BroadcastToChannelAsync(
@@ -30,7 +32,7 @@
 
                 if (_sessions.TryGet(member.ConnectionId, out var session) && session is not null)
                 {
-                    await session.SendAsync(line, ct);
+                    await session.SendAsync(_formatter.FormatFor(session, line), ct);
                 }
             }
         }
@@ -42,7 +44,7 @@
         {
             if (_sessions.TryGet(connectionId, out var session) && session is not null)
             {
-                await session.SendAsync(line, ct);
+                await session.SendAsync(_formatter.FormatFor(session, line), ct);
             }
         }
     }

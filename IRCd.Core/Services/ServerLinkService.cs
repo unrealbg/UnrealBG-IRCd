@@ -112,6 +112,20 @@ namespace IRCd.Core.Services
             }
         }
 
+        public async Task PropagateNoticeAsync(string fromUid, string target, string text, CancellationToken ct)
+        {
+            var msgId = NewMsgId();
+            MarkSeen(msgId);
+            var originSid = LocalOriginSid;
+
+            foreach (var s in _linksByConn.Values)
+            {
+                if (!s.IsAuthenticated || !s.UserSyncEnabled)
+                    continue;
+                await s.SendAsync($"NOTICE {msgId} {originSid} {fromUid} {target} :{text}", ct);
+            }
+        }
+
         public async Task PropagateTopicAsync(string fromUid, string channel, string? topic, CancellationToken ct)
         {
             var msgId = NewMsgId();
@@ -183,7 +197,10 @@ namespace IRCd.Core.Services
             foreach (var s in _linksByConn.Values)
             {
                 if (!s.IsAuthenticated || !s.UserSyncEnabled)
+                {
                     continue;
+                }
+
                 await s.SendAsync($"BAN {msgId} {originSid} {channel} {ts} {mask} {setBy} {setAt}", ct);
             }
         }
@@ -197,7 +214,10 @@ namespace IRCd.Core.Services
             foreach (var s in _linksByConn.Values)
             {
                 if (!s.IsAuthenticated || !s.UserSyncEnabled)
+                {
                     continue;
+                }
+
                 await s.SendAsync($"BANDEL {msgId} {originSid} {channel} {ts} {mask}", ct);
             }
         }
@@ -597,7 +617,8 @@ namespace IRCd.Core.Services
                     var host = u.Host ?? "localhost";
                     var gecos = u.RealName ?? "";
 
-                    await session.SendAsync($"USER {uid} {nick} {user} {host} :{gecos}", ct);
+                    var secure = u.IsSecureConnection ? "1" : "0";
+                    await session.SendAsync($"USER {uid} {nick} {user} {host} {secure} :{gecos}", ct);
                 }
 
                 foreach (var chName in _state.GetAllChannelNames())
@@ -780,6 +801,9 @@ namespace IRCd.Core.Services
                         var userName = args[2];
                         var host = args[3];
 
+                        var secureFlag = args.Length >= 5 ? args[4] : "0";
+                        var isSecure = secureFlag == "1";
+
                         var remoteConnId = $"uid:{uid}";
 
                         var u = new User
@@ -789,6 +813,7 @@ namespace IRCd.Core.Services
                             Nick = nick,
                             UserName = userName,
                             Host = host,
+                            IsSecureConnection = isSecure,
                             RealName = trailing,
                             IsRegistered = true,
                             IsRemote = true,

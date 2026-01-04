@@ -23,6 +23,11 @@
         public int MaxUnregisteredPerIp { get; set; } = 3;
 
         /// <summary>
+        /// Maximum simultaneous active connections (registered or unregistered) per IP.
+        /// </summary>
+        public int MaxActiveConnectionsPerIp { get; set; } = 10;
+
+        /// <summary>
         /// Client must complete registration (NICK+USER) within this time or gets disconnected.
         /// </summary>
         public int RegistrationTimeoutSeconds { get; set; } = 30;

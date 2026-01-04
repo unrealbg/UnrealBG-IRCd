@@ -1,43 +1,38 @@
-﻿namespace IRCd.Transport.Tcp
+namespace IRCd.Transport.Tls
 {
-    using IRCd.Core.Abstractions;
-
     using System;
     using System.Net;
-    using System.Net.Sockets;
+    using System.Net.Security;
     using System.Text;
     using System.Threading;
     using System.Threading.Channels;
     using System.Threading.Tasks;
 
-    public sealed class TcpClientSession : IClientSession
+    using IRCd.Core.Abstractions;
+    using IRCd.Transport.Tcp;
+
+    public sealed class TlsClientSession : IClientSession
     {
-        private readonly TcpClient _client;
-        private readonly NetworkStream _stream;
+        private readonly SslStream _ssl;
         private readonly StreamReader _reader;
         private readonly StreamWriter _writer;
-        private readonly object _userModesLock = new();
-        private string _userModes = "";
 
         private readonly Channel<string> _outgoing;
 
-        private int _closed;
+        private readonly object _userModesLock = new();
+        private string _userModes = "";
 
+        private int _closed;
         private string? _lastPingToken;
 
-        public TcpClientSession(string connectionId, TcpClient client)
+        public TlsClientSession(string connectionId, EndPoint remoteEndPoint, SslStream ssl)
         {
             ConnectionId = connectionId;
+            RemoteEndPoint = remoteEndPoint;
+            _ssl = ssl;
 
-            _client = client;
-            _client.NoDelay = true;
-
-            _stream = _client.GetStream();
-
-            _reader = LineProtocol.CreateReader(_stream);
-            _writer = LineProtocol.CreateWriter(_stream);
-
-            RemoteEndPoint = client.Client.RemoteEndPoint ?? new IPEndPoint(IPAddress.None, 0);
+            _reader = LineProtocol.CreateReader(_ssl);
+            _writer = LineProtocol.CreateWriter(_ssl);
 
             _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(capacity: 256)
             {
@@ -50,16 +45,11 @@
             LastActivityUtc = DateTime.UtcNow;
         }
 
-        public string UserModes
-        {
-            get { lock (_userModesLock) return _userModes; }
-        }
-
         public string ConnectionId { get; }
 
         public EndPoint RemoteEndPoint { get; }
 
-        public bool IsSecureConnection => false;
+        public bool IsSecureConnection => true;
 
         public ISet<string> EnabledCapabilities { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -78,6 +68,11 @@
         public bool AwaitingPong { get; private set; }
 
         public string? LastPingToken => _lastPingToken;
+
+        public string UserModes
+        {
+            get { lock (_userModesLock) return _userModes; }
+        }
 
         public bool TryApplyUserModes(string modeString, out string normalizedModes)
         {
@@ -98,9 +93,7 @@
                     if (ch == '-') { adding = false; continue; }
 
                     if (ch is not ('i' or 'w' or 's'))
-                    {
                         return false;
-                    }
 
                     if (adding) set.Add(ch);
                     else set.Remove(ch);
@@ -137,10 +130,6 @@
             LastActivityUtc = DateTime.UtcNow;
         }
 
-        /// <summary>
-        /// Enqueue a line to be sent to the client (CRLF will be added by writer).
-        /// If the session is closed, this becomes a no-op.
-        /// </summary>
         public ValueTask SendAsync(string line, CancellationToken ct = default)
         {
             if (Volatile.Read(ref _closed) == 1)
@@ -152,21 +141,17 @@
             {
                 _ = CloseAsync("Send queue overflow", ct);
             }
+
             return ValueTask.CompletedTask;
         }
 
-        /// <summary>
-        /// Reads a single IRC line (without CRLF). Returns null on disconnect or when the stream is disposed.
-        /// </summary>
         public async Task<string?> ReadLineAsync(CancellationToken ct)
         {
             try
             {
                 var line = await _reader.ReadLineAsync();
                 if (line is null)
-                {
                     return null;
-                }
 
                 if (line.Length > LineProtocol.MaxLineChars)
                 {
@@ -186,10 +171,6 @@
             }
         }
 
-        /// <summary>
-        /// Dedicated single-reader loop that flushes queued outgoing lines.
-        /// Should be run as a background task per session.
-        /// </summary>
         public async Task RunWriterLoopAsync(CancellationToken ct)
         {
             try
@@ -197,53 +178,36 @@
                 await foreach (var line in _outgoing.Reader.ReadAllAsync(ct))
                 {
                     if (Volatile.Read(ref _closed) == 1)
-                    {
                         break;
-                    }
 
                     await _writer.WriteLineAsync(line);
                 }
             }
             catch (OperationCanceledException)
             {
-                // normal during shutdown
             }
             catch (ObjectDisposedException)
             {
-                // normal during close/dispose race
             }
             catch (IOException)
             {
-                // normal on disconnect
             }
             catch
             {
             }
         }
 
-        /// <summary>
-        /// Idempotent close. Safe to call multiple times.
-        /// </summary>
         public async ValueTask CloseAsync(string reason, CancellationToken ct = default)
         {
             if (Interlocked.Exchange(ref _closed, 1) == 1)
                 return;
 
-            try
-            {
-                _outgoing.Writer.TryWrite($":server ERROR :Closing Link: {reason}");
-            }
-            catch { /* ignore */ }
+            try { _outgoing.Writer.TryComplete(); } catch { }
 
-            try { _outgoing.Writer.TryComplete(); } catch { /* ignore */ }
+            try { _ssl.Close(); } catch { }
+            try { _ssl.Dispose(); } catch { }
 
-            try { _client.Close(); } catch { /* ignore */ }
-
-            try { _reader.Dispose(); } catch { /* ignore */ }
-            try { _writer.Dispose(); } catch { /* ignore */ }
-            try { _stream.Dispose(); } catch { /* ignore */ }
-
-            await ValueTask.CompletedTask;
+            await Task.CompletedTask;
         }
     }
 }

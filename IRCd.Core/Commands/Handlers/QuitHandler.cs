@@ -36,7 +36,7 @@
             {
                 var nick = session.Nick!;
                 var user = session.UserName ?? "u";
-                var host = "localhost";
+                var host = state.GetHostFor(session.ConnectionId);
 
                 var quitLine = $":{nick}!{user}@{host} QUIT :{reason}";
 

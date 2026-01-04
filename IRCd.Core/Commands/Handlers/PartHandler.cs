@@ -11,11 +11,13 @@
         public string Command => "PART";
         private readonly RoutingService _routing;
         private readonly ServerLinkService _links;
+        private readonly HostmaskService _hostmask;
 
-        public PartHandler(RoutingService routing, ServerLinkService links)
+        public PartHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask)
         {
             _routing = routing;
             _links = links;
+            _hostmask = hostmask;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -42,7 +44,8 @@
             }
 
             var nick = session.Nick!;
-            var partLine = $":{nick}!{session.UserName ?? "u"}@localhost PART {channelName}";
+            var host = _hostmask.GetDisplayedHost((session.RemoteEndPoint as System.Net.IPEndPoint)?.Address);
+            var partLine = $":{nick}!{session.UserName ?? "u"}@{host} PART {channelName}";
             await _routing.BroadcastToChannelAsync(channel, partLine, excludeConnectionId: null, ct);
 
             if (state.TryGetUser(session.ConnectionId, out var u) && u is not null && !string.IsNullOrWhiteSpace(u.Uid))

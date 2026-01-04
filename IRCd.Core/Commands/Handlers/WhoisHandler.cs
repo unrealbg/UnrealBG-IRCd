@@ -15,6 +15,13 @@
     {
         public string Command => "WHOIS";
 
+        private readonly ISessionRegistry _sessions;
+
+        public WhoisHandler(ISessionRegistry sessions)
+        {
+            _sessions = sessions;
+        }
+
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
             if (!session.IsRegistered)
@@ -51,6 +58,18 @@
             var realName = string.IsNullOrWhiteSpace(targetUser.RealName) ? "Unknown" : targetUser.RealName!;
 
             await session.SendAsync($":server 311 {me} {targetUser.Nick} {userName} {host} * :{realName}", ct);
+
+            var secure = targetUser.IsSecureConnection;
+
+            if (_sessions.TryGet(targetConn, out var targetSession) && targetSession is not null)
+            {
+                secure = targetSession.IsSecureConnection;
+            }
+
+            if (secure)
+            {
+                await session.SendAsync($":server 671 {me} {targetUser.Nick} :is using a secure connection", ct);
+            }
 
             await session.SendAsync($":server 312 {me} {targetUser.Nick} server :IRCd (.NET)", ct);
 

@@ -62,6 +62,12 @@
         private static bool IsRateLimitedCommand(string command)
             => command.Equals("PRIVMSG", StringComparison.OrdinalIgnoreCase)
             || command.Equals("NOTICE", StringComparison.OrdinalIgnoreCase)
-            || command.Equals("JOIN", StringComparison.OrdinalIgnoreCase);
+            || command.Equals("JOIN", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("WHO", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("WHOIS", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("NAMES", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("LIST", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("MODE", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("TOPIC", StringComparison.OrdinalIgnoreCase);
     }
 }

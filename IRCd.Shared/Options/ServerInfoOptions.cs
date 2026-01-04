@@ -6,6 +6,8 @@ namespace IRCd.Shared.Options
 
         public string Sid { get; set; } = "001";
 
+        public string Version { get; set; } = "UnrealBG-IRCd";
+
         public string Description { get; set; } = "IRCd";
 
         public string Network { get; set; } = "local";

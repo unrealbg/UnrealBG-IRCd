@@ -4,11 +4,13 @@ using IRCd.Core.Abstractions;
 using IRCd.Core.Commands;
 using IRCd.Core.Commands.Contracts;
 using IRCd.Core.Commands.Handlers;
+using IRCd.Core.Protocol;
 using IRCd.Core.Services;
 using IRCd.Core.State;
 using IRCd.Server.HostedServices;
 using IRCd.Shared.Options;
 using IRCd.Transport.Tcp;
+using IRCd.Transport.Tls;
 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -61,6 +63,7 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<ISessionRegistry>(sp => sp.GetRequiredService<InMemorySessionRegistry>());
 
         // Routing uses the same registry
+        services.AddSingleton<IrcFormatter>();
         services.AddSingleton<RoutingService>();
 
         // Core services
@@ -79,11 +82,14 @@ var host = Host.CreateDefaultBuilder(args)
 
         // Command handlers
         services.AddSingleton<IIrcCommandHandler, PingHandler>();
+        services.AddSingleton<IIrcCommandHandler, CapHandler>();
+        services.AddSingleton<IIrcCommandHandler, PassHandler>();
         services.AddSingleton<IIrcCommandHandler, NickHandler>();
         services.AddSingleton<IIrcCommandHandler, UserHandler>();
         services.AddSingleton<IIrcCommandHandler, JoinHandler>();
         services.AddSingleton<IIrcCommandHandler, PartHandler>();
         services.AddSingleton<IIrcCommandHandler, PrivMsgHandler>();
+        services.AddSingleton<IIrcCommandHandler, NoticeHandler>();
         services.AddSingleton<IIrcCommandHandler, QuitHandler>();
         services.AddSingleton<IIrcCommandHandler, NamesHandler>();
         services.AddSingleton<IIrcCommandHandler, WhoHandler>();
@@ -104,6 +110,7 @@ var host = Host.CreateDefaultBuilder(args)
 
         // Transport
         services.AddHostedService<TcpListenerHostedService>();
+        services.AddHostedService<TlsListenerHostedService>();
         services.AddHostedService<ServerLinkListenerHostedService>();
         services.AddHostedService<OutboundLinkHostedService>();
     })

@@ -12,13 +12,15 @@
         private readonly RoutingService _routing;
         private readonly RegistrationService _registration;
         private readonly ServerLinkService _links;
+        private readonly HostmaskService _hostmask;
         private readonly Microsoft.Extensions.Options.IOptions<IRCd.Shared.Options.IrcOptions> _options;
 
-        public NickHandler(RoutingService routing, RegistrationService registration, ServerLinkService links, Microsoft.Extensions.Options.IOptions<IRCd.Shared.Options.IrcOptions> options)
+        public NickHandler(RoutingService routing, RegistrationService registration, ServerLinkService links, HostmaskService hostmask, Microsoft.Extensions.Options.IOptions<IRCd.Shared.Options.IrcOptions> options)
         {
             _routing = routing;
             _registration = registration;
             _links = links;
+            _hostmask = hostmask;
             _options = options;
         }
 
@@ -71,7 +73,8 @@
             var channels = state.UpdateNickInUserChannels(session.ConnectionId, newNick);
 
             var user = session.UserName ?? "u";
-            var nickLine = $":{oldNick}!{user}@localhost NICK :{newNick}";
+            var host = (_hostmask.GetDisplayedHost((session.RemoteEndPoint as System.Net.IPEndPoint)?.Address));
+            var nickLine = $":{oldNick}!{user}@{host} NICK :{newNick}";
 
             foreach (var ch in channels)
             {

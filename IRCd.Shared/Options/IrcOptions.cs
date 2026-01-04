@@ -4,6 +4,8 @@
     {
         public string? ConfigFile { get; set; }
 
+        public string? ClientPassword { get; set; }
+
         public ServerInfoOptions ServerInfo { get; set; } = new();
 
         public ListenOptions Listen { get; set; } = new();
