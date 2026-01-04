@@ -1,4 +1,6 @@
-﻿using IRCd.Core.Abstractions;
+﻿using System.IO;
+
+using IRCd.Core.Abstractions;
 using IRCd.Core.Commands;
 using IRCd.Core.Commands.Contracts;
 using IRCd.Core.Commands.Handlers;
@@ -13,11 +15,15 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
+using IRCd.Core.Config;
+
 var host = Host.CreateDefaultBuilder(args)
+    .UseContentRoot(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..")))
     .ConfigureAppConfiguration((ctx, cfg) =>
     {
-        cfg.AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
-        cfg.AddJsonFile($"appsettings.{ctx.HostingEnvironment.EnvironmentName}.json", optional: true);
+        var contentRoot = ctx.HostingEnvironment.ContentRootPath;
+        cfg.AddJsonFile(Path.Combine(contentRoot, "appsettings.json"), optional: true, reloadOnChange: true);
+        cfg.AddJsonFile(Path.Combine(contentRoot, $"appsettings.{ctx.HostingEnvironment.EnvironmentName}.json"), optional: true);
         cfg.AddEnvironmentVariables(prefix: "IRCD_");
         cfg.AddCommandLine(args);
     })
@@ -29,7 +35,23 @@ var host = Host.CreateDefaultBuilder(args)
     .ConfigureServices((ctx, services) =>
     {
         // Options
-        services.Configure<IrcOptions>(ctx.Configuration.GetSection("Irc"));
+        services.AddOptions<IrcOptions>()
+            .Bind(ctx.Configuration.GetSection("Irc"))
+            .PostConfigure(o =>
+            {
+                var conf = o.ConfigFile;
+                if (string.IsNullOrWhiteSpace(conf))
+                    conf = "ircd.conf";
+
+                var confPath = Path.IsPathRooted(conf)
+                    ? conf
+                    : Path.Combine(ctx.HostingEnvironment.ContentRootPath, conf);
+
+                if (File.Exists(confPath))
+                {
+                    IrcdConfLoader.ApplyConfFile(o, confPath);
+                }
+            });
 
         // Core state
         services.AddSingleton<ServerState>();
@@ -48,6 +70,9 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<PingService>();
         services.AddHostedService<PingHostedService>();
         services.AddSingleton<LusersService>();
+        services.AddSingleton<HostmaskService>();
+        services.AddSingleton<MotdSender>();
+        services.AddSingleton<ServerLinkService>();
 
         // Flood protection
         services.AddSingleton(new SimpleFloodGate(maxLines: 12, window: TimeSpan.FromSeconds(10)));
@@ -70,6 +95,7 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IIrcCommandHandler, InviteHandler>();
         services.AddSingleton<IIrcCommandHandler, ListHandler>();
         services.AddSingleton<IIrcCommandHandler, MotdHandler>();
+        services.AddSingleton<IIrcCommandHandler, LinksHandler>();
         services.AddSingleton<IIrcCommandHandler, LusersHandler>();
         services.AddSingleton<IIrcCommandHandler, UserhostHandler>();
         services.AddSingleton<IIrcCommandHandler, PongHandler>();
@@ -78,6 +104,8 @@ var host = Host.CreateDefaultBuilder(args)
 
         // Transport
         services.AddHostedService<TcpListenerHostedService>();
+        services.AddHostedService<ServerLinkListenerHostedService>();
+        services.AddHostedService<OutboundLinkHostedService>();
     })
     .UseConsoleLifetime()
     .Build();
