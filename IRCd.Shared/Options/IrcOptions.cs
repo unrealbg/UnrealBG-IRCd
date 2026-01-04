@@ -6,6 +6,8 @@
 
         public string? ClientPassword { get; set; }
 
+        public string? OperPassword { get; set; }
+
         public ServerInfoOptions ServerInfo { get; set; } = new();
 
         public ListenOptions Listen { get; set; } = new();
@@ -21,5 +23,7 @@
         public MotdOptions Motd { get; set; } = new();
 
         public ConnectionGuardOptions ConnectionGuard { get; set; } = new();
+
+        public CommandLimitsOptions Limits { get; set; } = new();
     }
 }
