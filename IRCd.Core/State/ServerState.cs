@@ -1,15 +1,74 @@
 ﻿namespace IRCd.Core.State
 {
+    using System;
     using System.Collections.Concurrent;
+    using System.Collections.Generic;
+    using System.Linq;
 
     public sealed class ServerState
     {
         private readonly ConcurrentDictionary<string, string> _nickToConn = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, User> _usersByConn = new();
+        private readonly ConcurrentDictionary<string, User> _usersByUid = new(StringComparer.OrdinalIgnoreCase);
 
         private readonly ConcurrentDictionary<string, Channel> _channels = new(StringComparer.OrdinalIgnoreCase);
 
         private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _userChannels = new();
+
+        private readonly ConcurrentDictionary<string, RemoteServer> _serversBySid = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, RemoteServer> _serversByConn = new(StringComparer.OrdinalIgnoreCase);
+
+        private readonly ConcurrentDictionary<string, string> _nextHopBySid = new(StringComparer.OrdinalIgnoreCase);
+
+        public string GetHostFor(string connectionId)
+        {
+            return _usersByConn.TryGetValue(connectionId, out var u) && !string.IsNullOrWhiteSpace(u.Host)
+                ? u.Host!
+                : "localhost";
+        }
+
+        public bool TryRegisterRemoteServer(RemoteServer server)
+        {
+            if (string.IsNullOrWhiteSpace(server.Sid) || string.IsNullOrWhiteSpace(server.Name) || string.IsNullOrWhiteSpace(server.ConnectionId))
+                return false;
+
+            if (_serversBySid.ContainsKey(server.Sid))
+                return false;
+
+            if (!_serversBySid.TryAdd(server.Sid, server))
+                return false;
+
+            _serversByConn[server.ConnectionId] = server;
+            _nextHopBySid[server.Sid] = server.ConnectionId;
+            return true;
+        }
+
+        public bool TryGetNextHopBySid(string sid, out string? connectionId)
+        {
+            if (_nextHopBySid.TryGetValue(sid, out var c))
+            {
+                connectionId = c;
+                return true;
+            }
+
+            connectionId = null;
+            return false;
+        }
+
+        public void RemoveRemoteServerByConnection(string connectionId)
+        {
+            if (_serversByConn.TryRemove(connectionId, out var srv))
+            {
+                _serversBySid.TryRemove(srv.Sid, out _);
+                _nextHopBySid.TryRemove(srv.Sid, out _);
+            }
+        }
+
+        public bool TryGetRemoteServerByConnection(string connectionId, out RemoteServer? server)
+            => _serversByConn.TryGetValue(connectionId, out server);
+
+        public IReadOnlyCollection<RemoteServer> GetRemoteServers()
+            => _serversBySid.Values.ToArray();
 
         public IReadOnlyList<Channel> UpdateNickInUserChannels(string connectionId, string newNick)
         {
@@ -36,8 +95,43 @@
         {
             var ok = _usersByConn.TryAdd(user.ConnectionId, user);
             _userChannels.TryAdd(user.ConnectionId, new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase));
+
+            if (!string.IsNullOrWhiteSpace(user.Uid))
+            {
+                _usersByUid[user.Uid!] = user;
+            }
+
             return ok;
         }
+
+        public bool TryAddRemoteUser(User user)
+        {
+            if (string.IsNullOrWhiteSpace(user.Uid) || string.IsNullOrWhiteSpace(user.Nick))
+                return false;
+
+            if (!_nickToConn.TryAdd(user.Nick!, user.ConnectionId))
+            {
+                return false;
+            }
+
+            user.IsRemote = true;
+
+            if (!_usersByConn.TryAdd(user.ConnectionId, user))
+            {
+                _nickToConn.TryRemove(user.Nick!, out _);
+                return false;
+            }
+
+            _userChannels.TryAdd(user.ConnectionId, new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase));
+            _usersByUid[user.Uid!] = user;
+            return true;
+        }
+
+        public bool TryGetUserByUid(string uid, out User? user)
+            => _usersByUid.TryGetValue(uid, out user);
+
+        public IReadOnlyCollection<User> GetUsersSnapshot()
+            => _usersByConn.Values.ToArray();
 
         public bool TryGetUser(string connectionId, out User? user) => _usersByConn.TryGetValue(connectionId, out user);
 
@@ -80,6 +174,9 @@
 
         public bool TryGetChannel(string channelName, out Channel? channel)
             => _channels.TryGetValue(channelName, out channel);
+
+        public IReadOnlyCollection<string> GetAllChannelNames()
+            => _channels.Keys.ToArray();
 
         public IReadOnlyCollection<string> GetUserChannels(string connectionId)
         {
@@ -158,6 +255,11 @@
             if (_usersByConn.TryRemove(connectionId, out var user) && user.Nick is { Length: > 0 } nick)
             {
                 _nickToConn.TryRemove(nick, out _);
+
+                if (!string.IsNullOrWhiteSpace(user.Uid))
+                {
+                    _usersByUid.TryRemove(user.Uid!, out _);
+                }
             }
         }
 
@@ -201,19 +303,21 @@
         public ChannelPrivilege GetUserPrivilegeInChannel(string connectionId, string channelName)
         {
             if (_channels.TryGetValue(channelName, out var ch))
+            {
                 return ch.GetPrivilege(connectionId);
+            }
 
             return ChannelPrivilege.Normal;
         }
 
         public bool TrySetChannelPrivilege(
-    string channelName,
-    string actorConnectionId,
-    char modeChar,
-    bool enable,
-    string targetNick,
-    out Channel? channel,
-    out string? error)
+            string channelName,
+            string actorConnectionId,
+            char modeChar,
+            bool enable,
+            string targetNick,
+            out Channel? channel,
+            out string? error)
         {
             error = null;
             channel = null;
@@ -308,10 +412,29 @@
         }
 
         public IReadOnlyCollection<User> GetAllUsers()
-                 => _usersByConn.Values.ToArray();
+            => _usersByConn.Values.ToArray();
 
         public int UserCount => _usersByConn.Count;
 
         public DateTimeOffset CreatedUtc { get; } = DateTimeOffset.UtcNow;
+
+        public bool TrySetUserMode(string connectionId, UserModes mode, bool enable)
+        {
+            if (!_usersByConn.TryGetValue(connectionId, out var user))
+            {
+                return false;
+            }
+
+            if (enable)
+            {
+                user.Modes |= mode;
+            }
+            else
+            {
+                user.Modes &= ~mode;
+            }
+
+            return true;
+        }
     }
 }

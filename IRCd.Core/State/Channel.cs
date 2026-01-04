@@ -18,10 +18,20 @@
         {
             Name = name;
             Modes = ChannelModes.NoExternalMessages | ChannelModes.TopicOpsOnly; // +nt
+            CreatedTs = ChannelTimestamps.NowTs();
         }
 
         public string Name { get; }
+
+        public long CreatedTs { get; set; }
+
         public string? Topic { get; set; }
+
+        public string? TopicSetBy { get; private set; }
+
+        public DateTimeOffset? TopicSetAtUtc { get; private set; }
+
+        public long TopicTs { get; private set; }
 
         public ChannelModes Modes { get; private set; }
 
@@ -125,6 +135,18 @@
             }
         }
 
+        public bool AddBan(string mask, string setBy, DateTimeOffset setAtUtc)
+        {
+            lock (_bans)
+            {
+                if (_bans.Any(b => string.Equals(b.Mask, mask, StringComparison.OrdinalIgnoreCase)))
+                    return false;
+
+                _bans.Add(new ChannelBan(mask, setBy, setAtUtc));
+                return true;
+            }
+        }
+
         public bool RemoveBan(string mask)
         {
             lock (_bans)
@@ -157,10 +179,37 @@
             ApplyModeChange(ChannelModes.Key, Key is not null);
         }
 
+        public void ClearKey() => SetKey(null);
+
         public void SetLimit(int? limit)
         {
             UserLimit = (limit.HasValue && limit.Value > 0) ? limit.Value : null;
             ApplyModeChange(ChannelModes.Limit, UserLimit is not null);
+        }
+
+        public void ClearLimit() => SetLimit(null);
+
+        public void SetTopic(string? topic, string setBy)
+        {
+            Topic = string.IsNullOrWhiteSpace(topic) ? null : topic;
+            TopicSetBy = string.IsNullOrWhiteSpace(setBy) ? null : setBy;
+            TopicSetAtUtc = DateTimeOffset.UtcNow;
+            TopicTs = ChannelTimestamps.NowTs();
+        }
+
+        public bool TrySetTopicWithTs(string? topic, string setBy, long ts)
+        {
+            if (ts <= 0)
+                ts = ChannelTimestamps.NowTs();
+
+            if (ts < TopicTs)
+                return false;
+
+            Topic = string.IsNullOrWhiteSpace(topic) ? null : topic;
+            TopicSetBy = string.IsNullOrWhiteSpace(setBy) ? null : setBy;
+            TopicSetAtUtc = DateTimeOffset.FromUnixTimeSeconds(ts);
+            TopicTs = ts;
+            return true;
         }
     }
 
