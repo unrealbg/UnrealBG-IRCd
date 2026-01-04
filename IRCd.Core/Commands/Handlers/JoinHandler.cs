@@ -18,11 +18,13 @@
 
         private readonly RoutingService _routing;
         private readonly ServerLinkService _links;
+        private readonly HostmaskService _hostmask;
 
-        public JoinHandler(RoutingService routing, ServerLinkService links)
+        public JoinHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask)
         {
             _routing = routing;
             _links = links;
+            _hostmask = hostmask;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -43,6 +45,19 @@
             if (string.IsNullOrWhiteSpace(chanToken))
             {
                 await session.SendAsync($":server 461 {session.Nick} JOIN :Not enough parameters", ct);
+                return;
+            }
+
+            if (chanToken.Equals("0", StringComparison.Ordinal))
+            {
+                var myChannels = state.GetUserChannels(session.ConnectionId);
+                foreach (var chName in myChannels)
+                {
+                    var partMsg = new IrcMessage(null, "PART", new[] { chName }, null);
+
+                    await new PartHandler(_routing, _links, _hostmask).HandleAsync(session, partMsg, state, ct);
+                }
+
                 return;
             }
 
@@ -75,7 +90,7 @@
             if (state.TryGetChannel(channelName, out var existing) && existing is not null)
             {
                 var maskUserName = session.UserName ?? "u";
-                var host = "localhost";
+                var host = _hostmask.GetDisplayedHost((session.RemoteEndPoint as System.Net.IPEndPoint)?.Address);
                 var maskValue = $"{nick}!{maskUserName}@{host}";
 
                 foreach (var ban in existing.Bans)
@@ -122,7 +137,8 @@
             channel.RemoveInvite(nick);
 
             var userName = session.UserName ?? "u";
-            var joinLine = $":{nick}!{userName}@localhost JOIN :{channelName}";
+            var host2 = _hostmask.GetDisplayedHost((session.RemoteEndPoint as System.Net.IPEndPoint)?.Address);
+            var joinLine = $":{nick}!{userName}@{host2} JOIN :{channelName}";
             await _routing.BroadcastToChannelAsync(channel, joinLine, excludeConnectionId: null, ct);
 
             if (state.TryGetUser(session.ConnectionId, out var u) && u is not null && !string.IsNullOrWhiteSpace(u.Uid))

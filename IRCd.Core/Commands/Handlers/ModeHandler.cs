@@ -417,6 +417,11 @@
                     continue;
                 }
 
+                if (c == 'z' || c == 'Z')
+                {
+                    continue;
+                }
+
                 if (c != 'i')
                 {
                     continue;
@@ -439,6 +444,7 @@
         {
             var letters = new List<char>();
             if (modes.HasFlag(UserModes.Invisible)) letters.Add('i');
+            if (modes.HasFlag(UserModes.Secure)) letters.Add('Z');
             return "+" + new string(letters.ToArray());
         }
 
