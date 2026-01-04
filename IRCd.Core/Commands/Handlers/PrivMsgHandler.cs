@@ -14,10 +14,12 @@
         public string Command => "PRIVMSG";
 
         private readonly RoutingService _routing;
+        private readonly ServerLinkService _links;
 
-        public PrivMsgHandler(RoutingService routing)
+        public PrivMsgHandler(RoutingService routing, ServerLinkService links)
         {
             _routing = routing;
+            _links = links;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -75,6 +77,11 @@
 
                 var line = $"{prefix} PRIVMSG {target} :{text}";
                 await _routing.BroadcastToChannelAsync(channel, line, excludeConnectionId: session.ConnectionId, ct);
+
+                if (state.TryGetUser(session.ConnectionId, out var fromU) && fromU is not null && !string.IsNullOrWhiteSpace(fromU.Uid))
+                {
+                    await _links.PropagatePrivMsgAsync(fromU.Uid!, target, text, ct);
+                }
                 return;
             }
 
@@ -86,6 +93,11 @@
 
             var privLine = $"{prefix} PRIVMSG {target} :{text}";
             await _routing.SendToUserAsync(targetConn, privLine, ct);
+
+            if (state.TryGetUser(session.ConnectionId, out var fromU2) && fromU2 is not null && !string.IsNullOrWhiteSpace(fromU2.Uid))
+            {
+                await _links.PropagatePrivMsgAsync(fromU2.Uid!, target, text, ct);
+            }
         }
     }
 }

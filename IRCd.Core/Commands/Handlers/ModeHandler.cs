@@ -1,5 +1,6 @@
 ﻿namespace IRCd.Core.Commands.Handlers
 {
+    using System;
     using System.Collections.Generic;
     using System.Linq;
     using System.Threading;
@@ -16,10 +17,12 @@
         public string Command => "MODE";
 
         private readonly RoutingService _routing;
+        private readonly ServerLinkService _links;
 
-        public ModeHandler(RoutingService routing)
+        public ModeHandler(RoutingService routing, ServerLinkService links)
         {
             _routing = routing;
+            _links = links;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -36,11 +39,17 @@
                 return;
             }
 
-            var target = msg.Params[0];
+            var target = msg.Params[0]?.Trim();
 
-            if (!target.StartsWith('#'))
+            if (string.IsNullOrWhiteSpace(target))
             {
-                await HandleUserModeAsync(session, msg, target, ct);
+                await session.SendAsync($":server 461 {session.Nick} MODE :Not enough parameters", ct);
+                return;
+            }
+
+            if (!target.StartsWith("#", StringComparison.Ordinal))
+            {
+                await HandleUserModeAsync(session, msg, state, ct);
                 return;
             }
 
@@ -59,7 +68,7 @@
             var modeToken = msg.Params[1];
             if (string.IsNullOrWhiteSpace(modeToken) || (modeToken[0] != '+' && modeToken[0] != '-'))
             {
-                await session.SendAsync($":server 501 {session.Nick} :Unknown MODE flag", ct);
+                await session.SendAsync($":server 501 {session.Nick} :Unknown MODE flags", ct);
                 return;
             }
 
@@ -150,12 +159,12 @@
                                 return;
                             }
 
-                            var key = msg.Params[argIndex++];
-                            ch.SetKey(key);
+                            var keyArg = msg.Params[argIndex++];
+                            ch.SetKey(keyArg);
 
                             if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
                             appliedModes.Add('k');
-                            appliedArgs.Add(key);
+                            appliedArgs.Add(keyArg);
                         }
                         else
                         {
@@ -179,18 +188,16 @@
                             }
 
                             var raw = msg.Params[argIndex++];
-                            if (!int.TryParse(raw, out var limit) || limit <= 0)
+                            if (!int.TryParse(raw, out var limitArg) || limitArg <= 0)
                             {
                                 await session.SendAsync($":server 461 {session.Nick} MODE :Invalid limit", ct);
                                 return;
                             }
 
-                            ch.SetLimit(limit);
+                            ch.SetLimit(limitArg);
 
                             if (!appliedModes.Contains(currentSign))
-                            {
                                 appliedModes.Insert(0, currentSign);
-                            }
 
                             appliedModes.Add('l');
                             appliedArgs.Add(raw);
@@ -200,9 +207,7 @@
                             ch.SetLimit(null);
 
                             if (!appliedModes.Contains(currentSign))
-                            {
                                 appliedModes.Insert(0, currentSign);
-                            }
 
                             appliedModes.Add('l');
                         }
@@ -320,49 +325,127 @@
                 return;
 
             var nick = session.Nick!;
-            var userName = session.UserName ?? "u";
+            var userName2 = session.UserName ?? "u";
 
             var modeOut = BuildModeOut(modeToken[0], appliedModes);
             var argsOut = appliedArgs.Count > 0 ? " " + string.Join(' ', appliedArgs) : string.Empty;
 
-            var line = $":{nick}!{userName}@localhost MODE {target} {modeOut}{argsOut}";
+            var line = $":{nick}!{userName2}@localhost MODE {target} {modeOut}{argsOut}";
             await _routing.BroadcastToChannelAsync(finalChannel, line, excludeConnectionId: null, ct);
+
+            await _links.PropagateChannelModesAsync(target, finalChannel.CreatedTs, finalChannel.FormatModeString(), ct);
+
+            var key = finalChannel.Key ?? string.Empty;
+            var limit = finalChannel.UserLimit?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+            await _links.PropagateChannelMetaAsync(target, finalChannel.CreatedTs, key, limit, ct);
+
+            if (appliedModes.Contains('b') && appliedArgs.Count > 0)
+            {
+                var lastMask = appliedArgs[^1];
+                if (modeOut.Contains("+b", StringComparison.Ordinal))
+                {
+                    var ban = finalChannel.Bans.LastOrDefault(b => string.Equals(b.Mask, lastMask, StringComparison.OrdinalIgnoreCase));
+                    if (ban is not null)
+                    {
+                        await _links.PropagateBanAsync(target, finalChannel.CreatedTs, ban.Mask, ban.SetBy, ban.SetAtUtc.ToUnixTimeSeconds(), ct);
+                    }
+                }
+                else if (modeOut.Contains("-b", StringComparison.Ordinal))
+                {
+                    await _links.PropagateBanDelAsync(target, finalChannel.CreatedTs, lastMask, ct);
+                }
+            }
+
+            for (var i = 0; i < appliedModes.Count; i++)
+            {
+                var m = appliedModes[i];
+                if (m is 'o' or 'v')
+                {
+                    var nickArg = appliedArgs.Count > 0 ? appliedArgs[^1] : null;
+                    if (!string.IsNullOrWhiteSpace(nickArg) && state.TryGetConnectionIdByNick(nickArg, out var connId) && connId is not null)
+                    {
+                        if (state.TryGetUser(connId, out var uu) && uu is not null && !string.IsNullOrWhiteSpace(uu.Uid))
+                        {
+                            var priv = finalChannel.GetPrivilege(connId);
+                            await _links.PropagateMemberPrivilegeAsync(target, uu.Uid!, priv, ct);
+                        }
+                    }
+                }
+            }
         }
 
-        private static async ValueTask HandleUserModeAsync(IClientSession session, IrcMessage msg, string targetNick, CancellationToken ct)
+        private static async ValueTask HandleUserModeAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
-            var serverName = "server";
-            var me = session.Nick ?? "*";
+            var me = session.Nick!;
+            var targetNick = msg.Params[0];
 
-            if (!string.Equals(targetNick, me, System.StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(targetNick, me, StringComparison.OrdinalIgnoreCase))
             {
-                await session.SendAsync($":{serverName} 502 {me} :Can't change mode for other users", ct);
+                await session.SendAsync($":server 502 {me} :Can't change mode for other users", ct);
                 return;
             }
 
             if (msg.Params.Count == 1)
             {
-                var modes = session.UserModes;
-                var outModes = string.IsNullOrEmpty(modes) ? "+" : "+" + modes;
-                await session.SendAsync($":{serverName} 221 {me} {outModes}", ct);
+                if (!state.TryGetUser(session.ConnectionId, out var u) || u is null)
+                {
+                    await session.SendAsync($":server 401 {me} {targetNick} :No such nick", ct);
+                    return;
+                }
+
+                await session.SendAsync($":server 221 {me} {FormatUserModes(u.Modes)}", ct);
                 return;
             }
 
-            var modeString = msg.Params[1];
-            if (string.IsNullOrWhiteSpace(modeString) || (modeString[0] != '+' && modeString[0] != '-'))
+            var modeToken = msg.Params[1];
+            if (string.IsNullOrWhiteSpace(modeToken) || (modeToken[0] != '+' && modeToken[0] != '-'))
             {
-                await session.SendAsync($":{serverName} 501 {me} :Unknown MODE flag", ct);
+                await session.SendAsync($":server 501 {me} :Unknown MODE flags", ct);
                 return;
             }
 
-            if (!session.TryApplyUserModes(modeString, out var normalized))
+            var sign = modeToken[0];
+            var changed = false;
+
+            for (int i = 1; i < modeToken.Length; i++)
             {
-                await session.SendAsync($":{serverName} 501 {me} :Unknown MODE flag", ct);
-                return;
+                var c = modeToken[i];
+
+                if (c == '+' || c == '-')
+                {
+                    sign = c;
+                    continue;
+                }
+
+                if (c != 'i')
+                {
+                    continue;
+                }
+
+                var enable = sign == '+';
+                if (state.TrySetUserMode(session.ConnectionId, UserModes.Invisible, enable))
+                    changed = true;
             }
 
-            var user = session.UserName ?? "u";
-            await session.SendAsync($":{me}!{user}@localhost MODE {me} {normalized}", ct);
+            if (!changed)
+                return;
+
+            var userName = session.UserName ?? "u";
+            var host = "localhost";
+            await session.SendAsync($":{me}!{userName}@{host} MODE {me} :{ExtractAppliedUserModes(modeToken)}", ct);
+        }
+
+        private static string FormatUserModes(UserModes modes)
+        {
+            var letters = new List<char>();
+            if (modes.HasFlag(UserModes.Invisible)) letters.Add('i');
+            return "+" + new string(letters.ToArray());
+        }
+
+        private static string ExtractAppliedUserModes(string token)
+        {
+            var sign = token.Length > 0 && (token[0] == '+' || token[0] == '-') ? token[0] : '+';
+            return token.Contains('i') ? $"{sign}i" : $"{sign}";
         }
 
         private static List<(ChannelModes Mode, bool Enable)> ParseChannelModeChanges(string token)

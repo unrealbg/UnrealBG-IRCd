@@ -2,6 +2,14 @@
 {
     public sealed class IrcOptions
     {
+        public string? ConfigFile { get; set; }
+
+        public ServerInfoOptions ServerInfo { get; set; } = new();
+
+        public ListenOptions Listen { get; set; } = new();
+
+        public LinkOptions[] Links { get; set; } = Array.Empty<LinkOptions>();
+
         public int IrcPort { get; set; } = 6667;
 
         public RateLimitOptions RateLimit { get; set; } = new();
