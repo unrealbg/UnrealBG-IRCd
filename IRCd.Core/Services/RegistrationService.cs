@@ -62,7 +62,7 @@
             var serverVersion = _options.Value.ServerInfo?.Version ?? "UnrealBG-IRCd";
             var networkName = _options.Value.ServerInfo?.Network ?? "IRCd";
 
-            const string userModeLetters = "iZ";
+            const string userModeLetters = "ioZ";
             const string channelModeLetters = "bklimnpst";
 
             const string prefix = "(qaohv)~&@%+";
@@ -85,7 +85,7 @@
             await session.SendAsync($":{serverName} 004 {nick} {serverName} {serverVersion} {userModeLetters} {channelModeLetters}", ct);
 
             await session.SendAsync(
-                $":{serverName} 005 {nick} CHANTYPES={chanTypes} PREFIX={prefix} CHANMODES={chanModesIsupport} NICKLEN={nickLen} CHANNELLEN={chanLen} TOPICLEN={topicLen} AWAYLEN={awayLen} CASEMAPPING={caseMapping} MODES={maxModes} STATUSMSG={statusMsg} ELIST={elist} NETWORK={networkName} :are supported by this server",
+                $":{serverName} 005 {nick} CHANTYPES={chanTypes} PREFIX={prefix} CHANMODES={chanModesIsupport} USERMODES={userModeLetters} NICKLEN={nickLen} CHANNELLEN={chanLen} TOPICLEN={topicLen} AWAYLEN={awayLen} CASEMAPPING={caseMapping} MODES={maxModes} STATUSMSG={statusMsg} ELIST={elist} NETWORK={networkName} :are supported by this server",
                 ct);
 
             var users = state.UserCount;

@@ -11,5 +11,11 @@ namespace IRCd.Shared.Options
         public string Description { get; set; } = "IRCd";
 
         public string Network { get; set; } = "local";
+
+        public string? AdminLocation1 { get; set; }
+
+        public string? AdminLocation2 { get; set; }
+
+        public string? AdminEmail { get; set; }
     }
 }

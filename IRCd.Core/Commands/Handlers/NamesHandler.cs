@@ -1,13 +1,24 @@
 ﻿namespace IRCd.Core.Commands.Handlers
 {
+    using Microsoft.Extensions.Options;
+
     using IRCd.Core.Abstractions;
     using IRCd.Core.Commands.Contracts;
     using IRCd.Core.Protocol;
     using IRCd.Core.State;
 
+    using IRCd.Shared.Options;
+
     public sealed class NamesHandler : IIrcCommandHandler
     {
         public string Command => "NAMES";
+
+        private readonly IOptions<IrcOptions> _options;
+
+        public NamesHandler(IOptions<IrcOptions> options)
+        {
+            _options = options;
+        }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
@@ -36,7 +47,9 @@
             var targets = msg.Params[0]
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-            foreach (var chName in targets)
+            var max = _options.Value.Limits?.MaxNamesChannels > 0 ? _options.Value.Limits.MaxNamesChannels : 10;
+
+            foreach (var chName in targets.Take(max))
             {
                 await SendNamesForChannel(session, chName, state, ct);
             }
@@ -44,6 +57,12 @@
 
         private static async ValueTask SendNamesForChannel(IClientSession session, string channelName, ServerState state, CancellationToken ct)
         {
+            if (!IrcValidation.IsValidChannel(channelName, out _))
+            {
+                await session.SendAsync($":server 366 {session.Nick} {channelName} :End of /NAMES list.", ct);
+                return;
+            }
+
             if (!state.TryGetChannel(channelName, out var channel) || channel is null)
             {
                 await session.SendAsync($":server 366 {session.Nick} {channelName} :End of /NAMES list.", ct);

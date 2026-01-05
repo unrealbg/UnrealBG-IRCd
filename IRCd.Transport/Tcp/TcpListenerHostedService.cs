@@ -32,11 +32,16 @@
 
         private readonly ServerLinkService _links;
 
+        private readonly SimpleFloodGate _floodGate = new(maxLines: 20, window: TimeSpan.FromSeconds(10));
+
         private readonly ConnectionGuardService _guard;
 
         private readonly RoutingService _routing;
 
         private TcpListener? _listener;
+
+        private readonly object _activeLock = new();
+        private readonly Dictionary<string, TcpClientSession> _activeSessions = new(StringComparer.Ordinal);
 
         public TcpListenerHostedService(
             ILogger<TcpListenerHostedService> logger,
@@ -98,6 +103,18 @@
         public override Task StopAsync(CancellationToken cancellationToken)
         {
             try { _listener?.Stop(); } catch { /* ignore */ }
+
+            TcpClientSession[] sessions;
+            lock (_activeLock)
+            {
+                sessions = _activeSessions.Values.ToArray();
+            }
+
+            foreach (var s in sessions)
+            {
+                try { _ = s.CloseAsync("Server shutting down", cancellationToken); } catch { /* ignore */ }
+            }
+
             return base.StopAsync(cancellationToken);
         }
 
@@ -137,6 +154,11 @@
 
             var connectionId = Guid.NewGuid().ToString("N");
             var session = new TcpClientSession(connectionId, client);
+
+            lock (_activeLock)
+            {
+                _activeSessions[connectionId] = session;
+            }
 
             var now = DateTimeOffset.UtcNow;
             var host = _hostmask.GetDisplayedHost(remoteIp);
@@ -198,13 +220,19 @@
 
                     if (line is null)
                     {
-                        // remote closed
                         break;
                     }
 
                     if (string.IsNullOrWhiteSpace(line))
                     {
                         continue;
+                    }
+
+                    if (!_floodGate.Allow(connectionId))
+                    {
+                        try { await session.SendAsync("ERROR :Excess Flood", ct); } catch { /* ignore */ }
+                        try { await session.CloseAsync("Excess Flood", ct); } catch { /* ignore */ }
+                        break;
                     }
 
                     session.OnInboundLine();
@@ -289,6 +317,11 @@
                 try { _sessions.Remove(connectionId); } catch { /* ignore */ }
                 try { _state.RemoveUser(connectionId); } catch { /* ignore */ }
                 try { _rateLimit.ClearConnection(connectionId); } catch { /* ignore */ }
+
+                lock (_activeLock)
+                {
+                    _activeSessions.Remove(connectionId);
+                }
 
                 if (_guard.Enabled && !session.IsRegistered && !unregisteredReleased)
                 {

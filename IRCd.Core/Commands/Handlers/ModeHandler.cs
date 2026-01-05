@@ -53,6 +53,12 @@
                 return;
             }
 
+            if (!IrcValidation.IsValidChannel(target, out _))
+            {
+                await session.SendAsync($":server 403 {session.Nick} {target} :No such channel", ct);
+                return;
+            }
+
             if (msg.Params.Count == 1)
             {
                 if (!state.TryGetChannel(target, out var ch) || ch is null)
@@ -445,6 +451,7 @@
             var letters = new List<char>();
             if (modes.HasFlag(UserModes.Invisible)) letters.Add('i');
             if (modes.HasFlag(UserModes.Secure)) letters.Add('Z');
+            if (modes.HasFlag(UserModes.Operator)) letters.Add('o');
             return "+" + new string(letters.ToArray());
         }
 

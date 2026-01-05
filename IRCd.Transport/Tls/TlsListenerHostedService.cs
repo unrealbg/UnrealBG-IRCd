@@ -36,8 +36,14 @@ namespace IRCd.Transport.Tls
         private readonly IHostEnvironment _env;
         private readonly ServerLinkService _links;
 
+        private readonly IRCd.Transport.Tcp.SimpleFloodGate _floodGate = new(maxLines: 20, window: TimeSpan.FromSeconds(10));
+
         private TcpListener? _listener;
         private X509Certificate2? _cert;
+        private Dictionary<string, X509Certificate2>? _sniCerts;
+
+        private readonly object _activeLock = new();
+        private readonly Dictionary<string, TlsClientSession> _activeSessions = new(StringComparer.Ordinal);
 
         public TlsListenerHostedService(
             ILogger<TlsListenerHostedService> logger,
@@ -127,6 +133,32 @@ namespace IRCd.Transport.Tls
                         : X509CertificateLoader.LoadPkcs12FromFile(fullPath, listen.TlsCertificatePassword);
                 }
 
+                if (listen.TlsCertificates is not null && listen.TlsCertificates.Count > 0)
+                {
+                    _sniCerts = new Dictionary<string, X509Certificate2>(StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var kv in listen.TlsCertificates)
+                    {
+                        var name = kv.Key?.Trim();
+                        var cfg = kv.Value;
+                        if (string.IsNullOrWhiteSpace(name) || cfg is null || string.IsNullOrWhiteSpace(cfg.Path))
+                            continue;
+
+                        var p = cfg.Path;
+                        if (!System.IO.Path.IsPathRooted(p))
+                            p = System.IO.Path.Combine(_env.ContentRootPath, p);
+
+                        if (!System.IO.File.Exists(p))
+                            continue;
+
+                        var c = string.IsNullOrWhiteSpace(cfg.Password)
+                            ? X509CertificateLoader.LoadPkcs12FromFile(p, null)
+                            : X509CertificateLoader.LoadPkcs12FromFile(p, cfg.Password);
+
+                        _sniCerts[name] = c;
+                    }
+                }
+
                 _logger.LogInformation(
                     "TLS certificate loaded. Subject={Subject} Thumbprint={Thumbprint}",
                     _cert.Subject,
@@ -173,6 +205,31 @@ namespace IRCd.Transport.Tls
         public override Task StopAsync(CancellationToken cancellationToken)
         {
             try { _listener?.Stop(); } catch { }
+
+            TlsClientSession[] sessions;
+            lock (_activeLock)
+            {
+                sessions = _activeSessions.Values.ToArray();
+            }
+
+            foreach (var s in sessions)
+            {
+                try { _ = s.CloseAsync("Server shutting down", cancellationToken); } catch { }
+            }
+
+            try
+            {
+                if (_sniCerts is not null)
+                {
+                    foreach (var c in _sniCerts.Values)
+                    {
+                        try { c.Dispose(); } catch { }
+                    }
+
+                    _sniCerts = null;
+                }
+            }
+            catch { }
             return base.StopAsync(cancellationToken);
         }
 
@@ -215,7 +272,26 @@ namespace IRCd.Transport.Tls
             EndPoint remoteEndPoint = client.Client.RemoteEndPoint ?? new IPEndPoint(IPAddress.None, 0);
 
             using var net = client.GetStream();
-            using var ssl = new SslStream(net, leaveInnerStreamOpen: false);
+
+            RemoteCertificateValidationCallback? remoteCertValidation = null;
+            LocalCertificateSelectionCallback? certSelector = null;
+
+            if (_sniCerts is not null && _sniCerts.Count > 0)
+            {
+                certSelector = (sender, name, localCertificates, remoteCertificate, acceptableIssuers) =>
+                {
+                    var fallback = _cert ?? throw new InvalidOperationException("TLS certificate not loaded");
+
+                    if (string.IsNullOrWhiteSpace(name))
+                        return fallback;
+
+                    return _sniCerts.TryGetValue(name, out var chosen) ? chosen : fallback;
+                };
+            }
+
+            using var ssl = certSelector is null
+                ? new SslStream(net, leaveInnerStreamOpen: false)
+                : new SslStream(net, leaveInnerStreamOpen: false, remoteCertValidation, certSelector);
 
             try
             {
@@ -244,6 +320,11 @@ namespace IRCd.Transport.Tls
             }
 
             var session = new TlsClientSession(connectionId, remoteEndPoint, ssl);
+
+            lock (_activeLock)
+            {
+                _activeSessions[connectionId] = session;
+            }
 
             var now = DateTimeOffset.UtcNow;
             var host = _hostmask.GetDisplayedHost(remoteIp);
@@ -306,6 +387,13 @@ namespace IRCd.Transport.Tls
 
                     if (string.IsNullOrWhiteSpace(line))
                         continue;
+
+                    if (!_floodGate.Allow(connectionId))
+                    {
+                        try { await session.SendAsync("ERROR :Excess Flood", ct); } catch { }
+                        try { await session.CloseAsync("Excess Flood", ct); } catch { }
+                        break;
+                    }
 
                     session.OnInboundLine();
 
@@ -383,6 +471,12 @@ namespace IRCd.Transport.Tls
                 try { _sessions.Remove(connectionId); } catch { }
                 try { _state.RemoveUser(connectionId); } catch { }
                 try { _rateLimit.ClearConnection(connectionId); } catch { }
+                try { _floodGate.Remove(connectionId); } catch { }
+
+                lock (_activeLock)
+                {
+                    _activeSessions.Remove(connectionId);
+                }
 
                 if (_guard.Enabled && !session.IsRegistered && !unregisteredReleased)
                 {

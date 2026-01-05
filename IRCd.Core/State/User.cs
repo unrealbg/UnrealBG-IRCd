@@ -20,6 +20,8 @@
 
         public string? RealName { get; set; }
 
+        public string? AwayMessage { get; set; }
+
         public string? Host { get; set; }
 
         public bool IsSecureConnection { get; set; }

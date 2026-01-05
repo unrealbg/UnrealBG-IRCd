@@ -9,9 +9,20 @@
     using IRCd.Core.Protocol;
     using IRCd.Core.State;
 
+    using IRCd.Shared.Options;
+
+    using Microsoft.Extensions.Options;
+
     public sealed class WhoHandler : IIrcCommandHandler
     {
         public string Command => "WHO";
+
+        private readonly IOptions<IrcOptions> _options;
+
+        public WhoHandler(IOptions<IrcOptions> options)
+        {
+            _options = options;
+        }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
@@ -28,6 +39,19 @@
             }
 
             var target = msg.Params[0];
+
+            var maxLen = _options.Value.Limits?.MaxWhoMaskLength > 0 ? _options.Value.Limits.MaxWhoMaskLength : 256;
+            if (target.Length > maxLen)
+            {
+                await session.SendAsync($":server 315 {session.Nick} {target} :End of /WHO list.", ct);
+                return;
+            }
+
+            if (!target.StartsWith('#') && !IrcValidation.IsValidNick(target, out _))
+            {
+                await session.SendAsync($":server 315 {session.Nick} {target} :End of /WHO list.", ct);
+                return;
+            }
 
             if (target.StartsWith('#'))
             {
@@ -67,7 +91,9 @@
                 var host = state.GetHostFor(m.ConnectionId);
 
                 var pfx = m.Privilege.ToPrefix();
-                var flags = pfx is null ? "H" : "H" + pfx;
+                var hereFlag = string.IsNullOrWhiteSpace(u.AwayMessage) ? "H" : "G";
+                var flags = pfx is null ? hereFlag : hereFlag + pfx;
+                if (u.Modes.HasFlag(UserModes.Operator)) flags += "*";
 
                 await session.SendAsync(
                     $":server 352 {me} {channelName} {userName} {host} server {nick} {flags} :0 {realName}",
@@ -100,6 +126,15 @@
                 ?? "*";
 
             var flags = "H";
+            if (!string.IsNullOrWhiteSpace(user.AwayMessage))
+            {
+                flags = "G";
+            }
+
+            if (user.Modes.HasFlag(UserModes.Operator))
+            {
+                flags += "*";
+            }
 
             var host = state.GetHostFor(conn);
 

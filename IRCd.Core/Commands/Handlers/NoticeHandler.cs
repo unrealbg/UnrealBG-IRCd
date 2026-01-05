@@ -9,6 +9,10 @@ namespace IRCd.Core.Commands.Handlers
     using IRCd.Core.Services;
     using IRCd.Core.State;
 
+    using IRCd.Shared.Options;
+
+    using Microsoft.Extensions.Options;
+
     public sealed class NoticeHandler : IIrcCommandHandler
     {
         public string Command => "NOTICE";
@@ -16,12 +20,14 @@ namespace IRCd.Core.Commands.Handlers
         private readonly RoutingService _routing;
         private readonly ServerLinkService _links;
         private readonly HostmaskService _hostmask;
+        private readonly IOptions<IrcOptions> _options;
 
-        public NoticeHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask)
+        public NoticeHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask, IOptions<IrcOptions> options)
         {
             _routing = routing;
             _links = links;
             _hostmask = hostmask;
+            _options = options;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -39,61 +45,79 @@ namespace IRCd.Core.Commands.Handlers
             var target = msg.Params[0];
             var text = msg.Trailing!;
 
+            var maxTargets = _options.Value.Limits?.MaxNoticeTargets > 0 ? _options.Value.Limits.MaxNoticeTargets : 4;
+            var targets = target
+                .Split(',', System.StringSplitOptions.RemoveEmptyEntries | System.StringSplitOptions.TrimEntries)
+                .Take(maxTargets);
+
             var fromNick = session.Nick ?? "*";
             var fromUser = session.UserName ?? "u";
             var host = _hostmask.GetDisplayedHost((session.RemoteEndPoint as System.Net.IPEndPoint)?.Address);
             var prefix = $":{fromNick}!{fromUser}@{host}";
 
-            if (target.StartsWith('#'))
+            foreach (var t in targets)
             {
-                if (!state.TryGetChannel(target, out var channel) || channel is null)
+                if (t.StartsWith('#') && !IrcValidation.IsValidChannel(t, out _))
                 {
-                    return;
+                    continue;
                 }
 
-                var isMember = channel.Contains(session.ConnectionId);
-
-                if (channel.Modes.HasFlag(ChannelModes.NoExternalMessages) && !isMember)
+                if (!t.StartsWith('#') && !IrcValidation.IsValidNick(t, out _))
                 {
-                    return;
+                    continue;
                 }
 
-                if (!isMember)
+                if (t.StartsWith('#'))
                 {
-                    return;
-                }
-
-                if (channel.Modes.HasFlag(ChannelModes.Moderated))
-                {
-                    var priv = channel.GetPrivilege(session.ConnectionId);
-                    if (!priv.IsAtLeast(ChannelPrivilege.Voice))
+                    if (!state.TryGetChannel(t, out var channel) || channel is null)
                     {
-                        return;
+                        continue;
                     }
+
+                    var isMember = channel.Contains(session.ConnectionId);
+
+                    if (channel.Modes.HasFlag(ChannelModes.NoExternalMessages) && !isMember)
+                    {
+                        continue;
+                    }
+
+                    if (!isMember)
+                    {
+                        continue;
+                    }
+
+                    if (channel.Modes.HasFlag(ChannelModes.Moderated))
+                    {
+                        var priv = channel.GetPrivilege(session.ConnectionId);
+                        if (!priv.IsAtLeast(ChannelPrivilege.Voice))
+                        {
+                            continue;
+                        }
+                    }
+
+                    var line = $"{prefix} NOTICE {t} :{text}";
+                    await _routing.BroadcastToChannelAsync(channel, line, excludeConnectionId: session.ConnectionId, ct);
+
+                    if (state.TryGetUser(session.ConnectionId, out var fromU) && fromU is not null && !string.IsNullOrWhiteSpace(fromU.Uid))
+                    {
+                        await _links.PropagateNoticeAsync(fromU.Uid!, t, text, ct);
+                    }
+
+                    continue;
                 }
 
-                var line = $"{prefix} NOTICE {target} :{text}";
-                await _routing.BroadcastToChannelAsync(channel, line, excludeConnectionId: session.ConnectionId, ct);
-
-                if (state.TryGetUser(session.ConnectionId, out var fromU) && fromU is not null && !string.IsNullOrWhiteSpace(fromU.Uid))
+                if (!state.TryGetConnectionIdByNick(t, out var targetConn) || targetConn is null)
                 {
-                    await _links.PropagateNoticeAsync(fromU.Uid!, target, text, ct);
+                    continue;
                 }
 
-                return;
-            }
+                var noticeLine = $"{prefix} NOTICE {t} :{text}";
+                await _routing.SendToUserAsync(targetConn, noticeLine, ct);
 
-            if (!state.TryGetConnectionIdByNick(target, out var targetConn) || targetConn is null)
-            {
-                return;
-            }
-
-            var noticeLine = $"{prefix} NOTICE {target} :{text}";
-            await _routing.SendToUserAsync(targetConn, noticeLine, ct);
-
-            if (state.TryGetUser(session.ConnectionId, out var fromU2) && fromU2 is not null && !string.IsNullOrWhiteSpace(fromU2.Uid))
-            {
-                await _links.PropagateNoticeAsync(fromU2.Uid!, target, text, ct);
+                if (state.TryGetUser(session.ConnectionId, out var fromU2) && fromU2 is not null && !string.IsNullOrWhiteSpace(fromU2.Uid))
+                {
+                    await _links.PropagateNoticeAsync(fromU2.Uid!, t, text, ct);
+                }
             }
         }
     }

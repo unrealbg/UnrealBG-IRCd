@@ -37,6 +37,12 @@
                 return;
             }
 
+            if (!IrcValidation.IsValidChannel(channelName, out _))
+            {
+                await session.SendAsync($":server 403 {session.Nick} {channelName} :No such channel", ct);
+                return;
+            }
+
             if (!state.TryPartChannel(session.ConnectionId, channelName, out var channel) || channel is null)
             {
                 await session.SendAsync($":server 442 {session.Nick} {channelName} :You're not on that channel", ct);

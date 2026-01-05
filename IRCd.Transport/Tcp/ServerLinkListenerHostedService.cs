@@ -21,6 +21,11 @@ namespace IRCd.Transport.Tcp
 
         private TcpListener? _listener;
 
+        private readonly object _activeLock = new();
+        private readonly System.Collections.Generic.Dictionary<string, TcpServerLinkSession> _activeSessions = new(StringComparer.Ordinal);
+
+        private readonly SimpleFloodGate _floodGate = new(maxLines: 50, window: TimeSpan.FromSeconds(10));
+
         public ServerLinkListenerHostedService(
             ILogger<ServerLinkListenerHostedService> logger,
             IOptions<IrcOptions> options,
@@ -66,6 +71,18 @@ namespace IRCd.Transport.Tcp
         public override Task StopAsync(CancellationToken cancellationToken)
         {
             try { _listener?.Stop(); } catch { }
+
+            TcpServerLinkSession[] sessions;
+            lock (_activeLock)
+            {
+                sessions = _activeSessions.Values.ToArray();
+            }
+
+            foreach (var s in sessions)
+            {
+                try { _ = s.CloseAsync("Server shutting down", cancellationToken); } catch { }
+            }
+
             return base.StopAsync(cancellationToken);
         }
 
@@ -74,9 +91,32 @@ namespace IRCd.Transport.Tcp
             var connectionId = Guid.NewGuid().ToString("N");
             var session = new TcpServerLinkSession(connectionId, client);
 
+            lock (_activeLock)
+            {
+                _activeSessions[connectionId] = session;
+            }
+
             _logger.LogInformation("S2S inbound connection {ConnId} from {Remote}", connectionId, session.RemoteEndPoint);
 
-            await _links.HandleIncomingLinkAsync(session, ct);
+            try
+            {
+                if (!_floodGate.Allow(connectionId))
+                {
+                    await session.CloseAsync("Excess Flood", ct);
+                    return;
+                }
+
+                await _links.HandleIncomingLinkAsync(session, ct);
+            }
+            finally
+            {
+                try { _floodGate.Remove(connectionId); } catch { }
+
+                lock (_activeLock)
+                {
+                    _activeSessions.Remove(connectionId);
+                }
+            }
 
             _logger.LogInformation("S2S disconnected {ConnId}", connectionId);
         }

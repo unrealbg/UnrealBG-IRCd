@@ -37,7 +37,13 @@
             var targetNick = msg.Params[0];
             var channelName = msg.Params[1];
 
-            if (!channelName.StartsWith('#'))
+            if (!IrcValidation.IsValidNick(targetNick, out _))
+            {
+                await session.SendAsync($":server 401 {session.Nick} {targetNick} :No such nick", ct);
+                return;
+            }
+
+            if (!IrcValidation.IsValidChannel(channelName, out _))
             {
                 await session.SendAsync($":server 403 {session.Nick} {channelName} :No such channel", ct);
                 return;

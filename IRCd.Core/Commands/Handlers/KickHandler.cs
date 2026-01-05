@@ -41,9 +41,15 @@
             var meNick = session.Nick!;
             var meUser = session.UserName ?? "u";
 
-            if (!channelName.StartsWith('#'))
+            if (!IrcValidation.IsValidChannel(channelName, out _))
             {
                 await session.SendAsync($":server 403 {meNick} {channelName} :No such channel", ct);
+                return;
+            }
+
+            if (!IrcValidation.IsValidNick(targetNick, out _))
+            {
+                await session.SendAsync($":server 401 {meNick} {targetNick} :No such nick", ct);
                 return;
             }
 

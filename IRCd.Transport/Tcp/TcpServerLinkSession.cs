@@ -38,11 +38,12 @@ namespace IRCd.Transport.Tcp
 
             RemoteEndPoint = client.Client.RemoteEndPoint ?? new IPEndPoint(IPAddress.None, 0);
 
-            _outgoing = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+            _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(2048)
             {
                 SingleReader = true,
                 SingleWriter = false,
-                AllowSynchronousContinuations = true
+                AllowSynchronousContinuations = true,
+                FullMode = BoundedChannelFullMode.DropOldest
             });
         }
 
@@ -67,7 +68,10 @@ namespace IRCd.Transport.Tcp
             if (Volatile.Read(ref _closed) == 1)
                 return ValueTask.CompletedTask;
 
-            _outgoing.Writer.TryWrite(line);
+            if (!_outgoing.Writer.TryWrite(line))
+            {
+                _ = CloseAsync("Send queue overflow", ct);
+            }
             return ValueTask.CompletedTask;
         }
 

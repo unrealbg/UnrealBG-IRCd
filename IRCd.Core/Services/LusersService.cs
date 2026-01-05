@@ -8,14 +8,21 @@
 
     public sealed class LusersService
     {
+        private readonly Microsoft.Extensions.Options.IOptions<IRCd.Shared.Options.IrcOptions> _options;
+
+        public LusersService(Microsoft.Extensions.Options.IOptions<IRCd.Shared.Options.IrcOptions> options)
+        {
+            _options = options;
+        }
+
         public async ValueTask SendOnConnectAsync(IClientSession session, ServerState state, CancellationToken ct)
         {
-            var serverName = "server";
+            var serverName = _options.Value.ServerInfo?.Name ?? "server";
             var me = session.Nick ?? "*";
 
             var users = state.UserCount;
             var unknown = 0;
-            var ops = 0;
+            var ops = state.GetUsersSnapshot().Count(u => u.IsRegistered && u.Modes.HasFlag(UserModes.Operator));
             var channels = state.GetAllChannels().Count();
             var servers = 0;
 
