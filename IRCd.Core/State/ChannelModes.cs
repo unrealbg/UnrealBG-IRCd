@@ -12,6 +12,7 @@
         Limit = 1 << 4,
 
         Moderated = 1 << 5,
-        Secret = 1 << 6
+        Secret = 1 << 6,
+        Private = 1 << 7
     }
 }

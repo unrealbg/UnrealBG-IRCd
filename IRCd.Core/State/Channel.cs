@@ -110,6 +110,11 @@
                 flags.Add('m');
             }
 
+            if (Modes.HasFlag(ChannelModes.Private))
+            {
+                flags.Add('p');
+            }
+
             if (Modes.HasFlag(ChannelModes.Secret))
             {
                 flags.Add('s');
