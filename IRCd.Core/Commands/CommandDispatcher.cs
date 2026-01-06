@@ -16,18 +16,25 @@
     {
         private readonly Dictionary<string, IIrcCommandHandler> _handlers;
         private readonly RateLimitService _rateLimit;
+        private readonly IMetrics _metrics;
 
-        public CommandDispatcher(IEnumerable<IIrcCommandHandler> handlers, RateLimitService rateLimit)
+        public CommandDispatcher(IEnumerable<IIrcCommandHandler> handlers, RateLimitService rateLimit, IMetrics metrics)
         {
             _handlers = handlers.ToDictionary(h => h.Command, StringComparer.OrdinalIgnoreCase);
             _rateLimit = rateLimit;
+            _metrics = metrics;
         }
 
         public async ValueTask DispatchAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
+            _metrics.CommandProcessed(msg.Command);
+
             if (state.TryGetUser(session.ConnectionId, out var user) && user is not null)
             {
-                user.LastActivityUtc = DateTimeOffset.UtcNow;
+                if (UpdatesIdleForWhois(msg.Command))
+                {
+                    user.LastActivityUtc = DateTimeOffset.UtcNow;
+                }
             }
 
             if (_handlers.TryGetValue(msg.Command, out var handler))
@@ -43,6 +50,7 @@
 
                         if (_rateLimit.RegisterViolationAndShouldDisconnect(session.ConnectionId))
                         {
+                            _metrics.FloodKick();
                             var quit = _rateLimit.GetDisconnectQuitMessage();
                             await session.CloseAsync(quit, ct);
                         }
@@ -69,5 +77,11 @@
             || command.Equals("LIST", StringComparison.OrdinalIgnoreCase)
             || command.Equals("MODE", StringComparison.OrdinalIgnoreCase)
             || command.Equals("TOPIC", StringComparison.OrdinalIgnoreCase);
+
+        private static bool UpdatesIdleForWhois(string command)
+            => !command.Equals("PING", StringComparison.OrdinalIgnoreCase)
+               && !command.Equals("PONG", StringComparison.OrdinalIgnoreCase)
+               && !command.Equals("WHO", StringComparison.OrdinalIgnoreCase)
+               && !command.Equals("WHOIS", StringComparison.OrdinalIgnoreCase);
     }
 }
