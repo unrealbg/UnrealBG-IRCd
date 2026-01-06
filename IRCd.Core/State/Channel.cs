@@ -211,6 +211,45 @@
             TopicTs = ts;
             return true;
         }
+
+        public void ResetForTsCollision(long newCreatedTs)
+        {
+            if (newCreatedTs <= 0)
+            {
+                newCreatedTs = ChannelTimestamps.NowTs();
+            }
+
+            CreatedTs = newCreatedTs;
+
+            Modes = ChannelModes.NoExternalMessages | ChannelModes.TopicOpsOnly; // +nt baseline
+            Key = null;
+            UserLimit = null;
+
+            Topic = null;
+            TopicSetBy = null;
+            TopicSetAtUtc = null;
+            TopicTs = 0;
+
+            lock (_bans)
+            {
+                _bans.Clear();
+            }
+
+            lock (_invitedNicks)
+            {
+                _invitedNicks.Clear();
+            }
+
+            foreach (var kv in _members.ToArray())
+            {
+                var existing = kv.Value;
+                if (existing.Privilege != ChannelPrivilege.Normal)
+                {
+                    var updated = existing with { Privilege = ChannelPrivilege.Normal };
+                    _members.TryUpdate(kv.Key, updated, existing);
+                }
+            }
+        }
     }
 
     public sealed record ChannelMember(string ConnectionId, string Nick, ChannelPrivilege Privilege);
