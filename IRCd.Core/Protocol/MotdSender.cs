@@ -29,7 +29,7 @@
 
         public async ValueTask<bool> TrySendMotdAsync(IClientSession session, CancellationToken ct)
         {
-            var motd = _options.CurrentValue.Motd;
+            var motd = SelectMotd(session);
 
             var serverName = _options.CurrentValue.ServerInfo?.Name ?? "server";
 
@@ -58,6 +58,46 @@
 
             await session.SendAsync($":{serverName} 376 {me} :End of /MOTD command.", ct);
             return true;
+        }
+
+        private MotdOptions SelectMotd(IClientSession session)
+        {
+            var cfg = _options.CurrentValue;
+
+            var mappings = cfg.MotdByVhost;
+            if (mappings is null || mappings.Length == 0)
+                return cfg.Motd;
+
+            var localIp = string.Empty;
+            var localPort = 0;
+            if (session.LocalEndPoint is System.Net.IPEndPoint lep)
+            {
+                localIp = lep.Address.ToString();
+                localPort = lep.Port;
+            }
+
+            var keyIpPort = (!string.IsNullOrWhiteSpace(localIp) && localPort > 0) ? $"{localIp}:{localPort}" : string.Empty;
+
+            foreach (var m in mappings)
+            {
+                if (m is null)
+                    continue;
+
+                var v = (m.Vhost ?? string.Empty).Trim();
+                if (v.Length == 0)
+                    continue;
+
+                if (string.Equals(v, "*", StringComparison.OrdinalIgnoreCase))
+                    return m.Motd;
+
+                if (!string.IsNullOrWhiteSpace(keyIpPort) && string.Equals(v, keyIpPort, StringComparison.OrdinalIgnoreCase))
+                    return m.Motd;
+
+                if (!string.IsNullOrWhiteSpace(localIp) && string.Equals(v, localIp, StringComparison.OrdinalIgnoreCase))
+                    return m.Motd;
+            }
+
+            return cfg.Motd;
         }
 
         private async Task<List<string>> LoadMotdLinesAsync(MotdOptions motd, CancellationToken ct)
