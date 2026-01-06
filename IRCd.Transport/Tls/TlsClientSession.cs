@@ -25,16 +25,18 @@ namespace IRCd.Transport.Tls
         private int _closed;
         private string? _lastPingToken;
 
-        public TlsClientSession(string connectionId, EndPoint remoteEndPoint, SslStream ssl)
+        public TlsClientSession(string connectionId, EndPoint remoteEndPoint, EndPoint localEndPoint, SslStream ssl, int outgoingQueueCapacity)
         {
             ConnectionId = connectionId;
             RemoteEndPoint = remoteEndPoint;
+            LocalEndPoint = localEndPoint;
             _ssl = ssl;
 
             _reader = LineProtocol.CreateReader(_ssl);
             _writer = LineProtocol.CreateWriter(_ssl);
 
-            _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(capacity: 256)
+            var cap = outgoingQueueCapacity > 0 ? outgoingQueueCapacity : 256;
+            _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(capacity: cap)
             {
                 SingleReader = true,
                 SingleWriter = false,
@@ -48,6 +50,8 @@ namespace IRCd.Transport.Tls
         public string ConnectionId { get; }
 
         public EndPoint RemoteEndPoint { get; }
+
+        public EndPoint LocalEndPoint { get; }
 
         public bool IsSecureConnection => true;
 
@@ -134,8 +138,6 @@ namespace IRCd.Transport.Tls
         {
             if (Volatile.Read(ref _closed) == 1)
                 return ValueTask.CompletedTask;
-
-            LastActivityUtc = DateTime.UtcNow;
 
             if (!_outgoing.Writer.TryWrite(line))
             {

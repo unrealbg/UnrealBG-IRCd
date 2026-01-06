@@ -33,12 +33,18 @@ namespace IRCd.Transport.Tls
         private readonly ConnectionGuardService _guard;
         private readonly RoutingService _routing;
         private readonly RateLimitService _rateLimit;
+        private readonly RuntimeDLineService _dlines;
         private readonly IHostEnvironment _env;
         private readonly ServerLinkService _links;
 
-        private readonly IRCd.Transport.Tcp.SimpleFloodGate _floodGate = new(maxLines: 20, window: TimeSpan.FromSeconds(10));
+        private readonly IMetrics _metrics;
 
-        private TcpListener? _listener;
+        private readonly IRCd.Transport.Tcp.SimpleFloodGate _floodGate;
+
+        private readonly ConnectionAuthService? _authService;
+
+        private readonly object _listenerLock = new();
+        private readonly List<TcpListener> _listeners = new();
         private X509Certificate2? _cert;
         private Dictionary<string, X509Certificate2>? _sniCerts;
 
@@ -55,8 +61,11 @@ namespace IRCd.Transport.Tls
             RoutingService routing,
             HostmaskService hostmask,
             RateLimitService rateLimit,
+            RuntimeDLineService dlines,
             IHostEnvironment env,
-            ServerLinkService links)
+            ServerLinkService links,
+            IMetrics metrics,
+            ConnectionAuthService? authService = null)
         {
             _logger = logger;
             _dispatcher = dispatcher;
@@ -67,8 +76,17 @@ namespace IRCd.Transport.Tls
             _routing = routing;
             _hostmask = hostmask;
             _rateLimit = rateLimit;
+            _dlines = dlines;
             _env = env;
             _links = links;
+            _metrics = metrics;
+
+            _authService = authService;
+
+            var flood = options.Value.Flood?.TlsClient;
+            var maxLines = flood?.MaxLines > 0 ? flood.MaxLines : 20;
+            var windowSeconds = flood?.WindowSeconds > 0 ? flood.WindowSeconds : 10;
+            _floodGate = new IRCd.Transport.Tcp.SimpleFloodGate(maxLines: maxLines, window: TimeSpan.FromSeconds(windowSeconds));
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -170,25 +188,50 @@ namespace IRCd.Transport.Tls
                 return;
             }
 
-            var ip = IPAddress.Any;
-            if (!string.IsNullOrWhiteSpace(listen.BindIp) && IPAddress.TryParse(listen.BindIp, out var parsed))
-                ip = parsed;
+            var endpoints = _options.Value.ListenEndpoints?.Where(e => e is not null && e.Tls).ToArray() ?? Array.Empty<ListenEndpointOptions>();
+            if (endpoints.Length == 0)
+            {
+                var port = listen.TlsClientPort > 0 ? listen.TlsClientPort : 6697;
+                endpoints = new[] { new ListenEndpointOptions { BindIp = listen.BindIp, Port = port, Tls = true } };
+            }
 
-            var port = listen.TlsClientPort > 0 ? listen.TlsClientPort : 6697;
+            var tasks = new List<Task>(endpoints.Length);
 
-            _listener = new TcpListener(ip, port);
-            _listener.Start();
+            foreach (var ep in endpoints)
+            {
+                var ip = IPAddress.Any;
+                if (!string.IsNullOrWhiteSpace(ep.BindIp) && IPAddress.TryParse(ep.BindIp, out var parsed))
+                    ip = parsed;
 
-            _logger.LogInformation("IRCd TLS listening on {IP}:{Port}", ip, port);
+                var listener = new TcpListener(ip, ep.Port);
+                listener.Start();
 
-            while (!stoppingToken.IsCancellationRequested)
+                lock (_listenerLock)
+                {
+                    _listeners.Add(listener);
+                }
+
+                _logger.LogInformation("IRCd TLS listening on {IP}:{Port}", ip, ep.Port);
+                tasks.Add(Task.Run(() => AcceptLoopAsync(listener, stoppingToken), stoppingToken));
+            }
+
+            await Task.WhenAll(tasks);
+        }
+
+        private async Task AcceptLoopAsync(TcpListener listener, CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested)
             {
                 TcpClient client;
                 try
                 {
-                    client = await _listener.AcceptTcpClientAsync(stoppingToken);
+                    client = await listener.AcceptTcpClientAsync(ct);
                 }
                 catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (ObjectDisposedException)
                 {
                     break;
                 }
@@ -198,13 +241,23 @@ namespace IRCd.Transport.Tls
                     continue;
                 }
 
-                _ = Task.Run(() => HandleClientAsync(client, stoppingToken), stoppingToken);
+                _ = Task.Run(() => HandleClientAsync(client, ct), ct);
             }
         }
 
         public override Task StopAsync(CancellationToken cancellationToken)
         {
-            try { _listener?.Stop(); } catch { }
+            TcpListener[] listeners;
+            lock (_listenerLock)
+            {
+                listeners = _listeners.ToArray();
+                _listeners.Clear();
+            }
+
+            foreach (var l in listeners)
+            {
+                try { l.Stop(); } catch { }
+            }
 
             TlsClientSession[] sessions;
             lock (_activeLock)
@@ -244,6 +297,27 @@ namespace IRCd.Transport.Tls
         private async Task HandleClientAsync(TcpClient client, CancellationToken ct)
         {
             var remoteIp = GetRemoteIp(client);
+
+            if (_dlines.TryMatch(remoteIp.ToString(), out var dlineReason))
+            {
+                try
+                {
+                    using var stream = client.GetStream();
+                    using var writer = new System.IO.StreamWriter(stream, new UTF8Encoding(false))
+                    {
+                        NewLine = "\r\n",
+                        AutoFlush = true
+                    };
+
+                    await writer.WriteLineAsync($"ERROR :D-Lined ({dlineReason})");
+                }
+                catch { }
+
+                try { client.Close(); } catch { }
+                return;
+            }
+
+            var localEndPoint = client.Client.LocalEndPoint ?? new IPEndPoint(IPAddress.None, 0);
 
             if (_guard.Enabled)
             {
@@ -319,7 +393,10 @@ namespace IRCd.Transport.Tls
                 return;
             }
 
-            var session = new TlsClientSession(connectionId, remoteEndPoint, ssl);
+            var queueCap = _options.Value.Transport?.Queues?.ClientSendQueueCapacity ?? 256;
+            var session = new TlsClientSession(connectionId, remoteEndPoint, localEndPoint, ssl, queueCap);
+
+            var metricsCounted = false;
 
             lock (_activeLock)
             {
@@ -335,10 +412,14 @@ namespace IRCd.Transport.Tls
                 ConnectedAtUtc = now,
                 LastActivityUtc = now,
                 Host = host,
-                IsSecureConnection = true
+                IsSecureConnection = true,
+                RemoteIp = remoteIp.ToString(),
             });
 
             _sessions.Add(session);
+
+            _metrics.ConnectionAccepted(secure: true);
+            metricsCounted = true;
 
             _logger.LogInformation("TLS client connected {ConnId} from {Remote}", connectionId, session.RemoteEndPoint);
 
@@ -346,6 +427,13 @@ namespace IRCd.Transport.Tls
 
             var serverName = _options.Value.ServerInfo?.Name ?? "server";
             await session.SendAsync($":{serverName} NOTICE * :Welcome (TLS). Use NICK/USER.", ct);
+
+            if (_authService is not null)
+            {
+                var remotePort = (session.RemoteEndPoint as IPEndPoint)?.Port ?? 0;
+                var localPort = (session.LocalEndPoint as IPEndPoint)?.Port ?? 0;
+                _authService.StartAuthChecks(session, remoteIp, remotePort, localPort, ct);
+            }
 
             Task<string?>? pendingRead = null;
 
@@ -390,6 +478,7 @@ namespace IRCd.Transport.Tls
 
                     if (!_floodGate.Allow(connectionId))
                     {
+                        _metrics.FloodKick();
                         try { await session.SendAsync("ERROR :Excess Flood", ct); } catch { }
                         try { await session.CloseAsync("Excess Flood", ct); } catch { }
                         break;
@@ -489,6 +578,11 @@ namespace IRCd.Transport.Tls
                 }
 
                 try { await session.CloseAsync("Client disconnected", CancellationToken.None); } catch { }
+
+                if (metricsCounted)
+                {
+                    _metrics.ConnectionClosed(secure: true);
+                }
 
                 _logger.LogInformation("TLS client disconnected {ConnId}", connectionId);
             }
