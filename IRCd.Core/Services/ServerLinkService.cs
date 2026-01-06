@@ -587,6 +587,7 @@ namespace IRCd.Core.Services
                     't' => ChannelModes.TopicOpsOnly,
                     'm' => ChannelModes.Moderated,
                     'i' => ChannelModes.InviteOnly,
+                    'p' => ChannelModes.Private,
                     's' => ChannelModes.Secret,
                     _ => (ChannelModes?)null
                 };
@@ -1759,6 +1760,7 @@ namespace IRCd.Core.Services
                                 case 't': ch.ApplyModeChange(ChannelModes.TopicOpsOnly, enable); break;
                                 case 'i': ch.ApplyModeChange(ChannelModes.InviteOnly, enable); break;
                                 case 'm': ch.ApplyModeChange(ChannelModes.Moderated, enable); break;
+                                case 'p': ch.ApplyModeChange(ChannelModes.Private, enable); break;
                                 case 's': ch.ApplyModeChange(ChannelModes.Secret, enable); break;
                                 default: break;
                             }

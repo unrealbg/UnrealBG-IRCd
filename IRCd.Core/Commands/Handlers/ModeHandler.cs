@@ -120,12 +120,12 @@
                     continue;
                 }
 
-                if (c is not ('q' or 'a' or 'o' or 'h' or 'v' or 'b' or 'i' or 'k' or 'l' or 'm' or 's'))
+                if (c is not ('q' or 'a' or 'o' or 'h' or 'v' or 'b' or 'i' or 'k' or 'l' or 'm' or 'p' or 's'))
                 {
                     continue;
                 }
 
-                if (c is 'i' or 'k' or 'l' or 'm' or 's')
+                if (c is 'i' or 'k' or 'l' or 'm' or 'p' or 's')
                 {
                     if (!state.TryGetChannel(target, out var ch) || ch is null)
                     {
@@ -230,6 +230,16 @@
 
                         if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
                         appliedModes.Add('m');
+                        continue;
+                    }
+
+                    if (c == 'p')
+                    {
+                        var changed = ch.ApplyModeChange(ChannelModes.Private, setOn);
+                        if (!changed) continue;
+
+                        if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
+                        appliedModes.Add('p');
                         continue;
                     }
 
