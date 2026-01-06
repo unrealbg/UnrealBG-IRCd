@@ -25,12 +25,36 @@
 
         private string? _lastPingToken;
 
-        public TcpClientSession(string connectionId, TcpClient client)
+        public TcpClientSession(
+            string connectionId,
+            TcpClient client,
+            EndPoint localEndPoint,
+            bool keepAliveEnabled,
+            int keepAliveTimeMs,
+            int keepAliveIntervalMs,
+            int outgoingQueueCapacity)
         {
             ConnectionId = connectionId;
 
             _client = client;
             _client.NoDelay = true;
+
+            if (keepAliveEnabled)
+            {
+                _client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+
+                if (OperatingSystem.IsWindows())
+                {
+                    var timeMs = keepAliveTimeMs > 0 ? keepAliveTimeMs : 120_000;
+                    var intervalMs = keepAliveIntervalMs > 0 ? keepAliveIntervalMs : 30_000;
+
+                    var keepaliveValues = new byte[12];
+                    BitConverter.GetBytes(1).CopyTo(keepaliveValues, 0);  // on/off
+                    BitConverter.GetBytes(timeMs).CopyTo(keepaliveValues, 4);  // time (ms)
+                    BitConverter.GetBytes(intervalMs).CopyTo(keepaliveValues, 8);   // interval (ms)
+                    _client.Client.IOControl(IOControlCode.KeepAliveValues, keepaliveValues, null);
+                }
+            }
 
             _stream = _client.GetStream();
 
@@ -39,7 +63,10 @@
 
             RemoteEndPoint = client.Client.RemoteEndPoint ?? new IPEndPoint(IPAddress.None, 0);
 
-            _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(capacity: 256)
+            LocalEndPoint = localEndPoint;
+
+            var cap = outgoingQueueCapacity > 0 ? outgoingQueueCapacity : 256;
+            _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(capacity: cap)
             {
                 SingleReader = true,
                 SingleWriter = false,
@@ -58,6 +85,8 @@
         public string ConnectionId { get; }
 
         public EndPoint RemoteEndPoint { get; }
+
+        public EndPoint LocalEndPoint { get; }
 
         public bool IsSecureConnection => false;
 
@@ -145,8 +174,6 @@
         {
             if (Volatile.Read(ref _closed) == 1)
                 return ValueTask.CompletedTask;
-
-            LastActivityUtc = DateTime.UtcNow;
 
             if (!_outgoing.Writer.TryWrite(line))
             {

@@ -20,7 +20,7 @@ namespace IRCd.Transport.Tcp
 
         private int _closed;
 
-        public TcpServerLinkSession(string connectionId, TcpClient client)
+        public TcpServerLinkSession(string connectionId, TcpClient client, int outgoingQueueCapacity)
         {
             ConnectionId = connectionId;
 
@@ -38,7 +38,8 @@ namespace IRCd.Transport.Tcp
 
             RemoteEndPoint = client.Client.RemoteEndPoint ?? new IPEndPoint(IPAddress.None, 0);
 
-            _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(2048)
+            var cap = outgoingQueueCapacity > 0 ? outgoingQueueCapacity : 2048;
+            _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(cap)
             {
                 SingleReader = true,
                 SingleWriter = false,
