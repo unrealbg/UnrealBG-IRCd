@@ -24,7 +24,7 @@ namespace IRCd.Transport.Tcp
         private readonly object _activeLock = new();
         private readonly System.Collections.Generic.Dictionary<string, TcpServerLinkSession> _activeSessions = new(StringComparer.Ordinal);
 
-        private readonly SimpleFloodGate _floodGate = new(maxLines: 50, window: TimeSpan.FromSeconds(10));
+        private readonly SimpleFloodGate _floodGate;
 
         public ServerLinkListenerHostedService(
             ILogger<ServerLinkListenerHostedService> logger,
@@ -34,6 +34,11 @@ namespace IRCd.Transport.Tcp
             _logger = logger;
             _options = options;
             _links = links;
+
+            var flood = options.Value.Flood?.ServerLink;
+            var maxLines = flood?.MaxLines > 0 ? flood.MaxLines : 50;
+            var windowSeconds = flood?.WindowSeconds > 0 ? flood.WindowSeconds : 10;
+            _floodGate = new SimpleFloodGate(maxLines: maxLines, window: TimeSpan.FromSeconds(windowSeconds));
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -89,7 +94,8 @@ namespace IRCd.Transport.Tcp
         private async Task HandleLinkAsync(TcpClient client, CancellationToken ct)
         {
             var connectionId = Guid.NewGuid().ToString("N");
-            var session = new TcpServerLinkSession(connectionId, client);
+            var cap = _options.Value.Transport?.Queues?.ServerLinkSendQueueCapacity ?? 2048;
+            var session = new TcpServerLinkSession(connectionId, client, cap);
 
             lock (_activeLock)
             {

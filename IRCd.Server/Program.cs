@@ -7,6 +7,7 @@ using IRCd.Core.Commands.Handlers;
 using IRCd.Core.Protocol;
 using IRCd.Core.Services;
 using IRCd.Core.State;
+using IRCd.Services.DependencyInjection;
 using IRCd.Server.HostedServices;
 using IRCd.Shared.Options;
 using IRCd.Transport.Tcp;
@@ -66,19 +67,31 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IrcFormatter>();
         services.AddSingleton<RoutingService>();
 
+        // IRC services (NickServ, etc.)
+        services.AddIrcServices();
+
+        // Observability
+            services.AddSingleton<WatchService>();
+        services.AddSingleton<IMetrics, DefaultMetrics>();
+
         // Core services
         services.AddSingleton<RegistrationService>();
         services.AddSingleton<RateLimitService>();
         services.AddSingleton<ConnectionGuardService>();
+        services.AddSingleton<ConnectionAuthService>();
         services.AddSingleton<PingService>();
         services.AddHostedService<PingHostedService>();
         services.AddSingleton<LusersService>();
         services.AddSingleton<HostmaskService>();
+        services.AddSingleton<SilenceService>();
         services.AddSingleton<MotdSender>();
         services.AddSingleton<ServerLinkService>();
+        services.AddSingleton<RuntimeKLineService>();
+            services.AddSingleton<IIrcCommandHandler, WatchHandler>();
+        services.AddSingleton<RuntimeDLineService>();
+        services.AddSingleton<WhowasService>();
 
         // Flood protection
-        services.AddSingleton(new SimpleFloodGate(maxLines: 12, window: TimeSpan.FromSeconds(10)));
 
         // Command handlers
         services.AddSingleton<IIrcCommandHandler, PingHandler>();
@@ -99,18 +112,47 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IIrcCommandHandler, KickHandler>();
         services.AddSingleton<IIrcCommandHandler, KickBanHandler>();
         services.AddSingleton<IIrcCommandHandler, InviteHandler>();
+        services.AddSingleton<IIrcCommandHandler, KnockHandler>();
         services.AddSingleton<IIrcCommandHandler, ListHandler>();
         services.AddSingleton<IIrcCommandHandler, AwayHandler>();
         services.AddSingleton<IIrcCommandHandler, IsonHandler>();
+        services.AddSingleton<IIrcCommandHandler, SilenceHandler>();
+        services.AddSingleton<IIrcCommandHandler, ChghostHandler>();
+        services.AddSingleton<IIrcCommandHandler, Svs2modeHandler>();
+        services.AddSingleton<IIrcCommandHandler, SvsjoinHandler>();
+        services.AddSingleton<IIrcCommandHandler, SvsnickHandler>();
+        services.AddSingleton<IIrcCommandHandler, SvspartHandler>();
+        services.AddSingleton<IIrcCommandHandler, OperwhoHandler>();
+        services.AddSingleton<IIrcCommandHandler, OperwhoisHandler>();
         services.AddSingleton<IIrcCommandHandler, TimeHandler>();
+        services.AddSingleton<IIrcCommandHandler, UptimeHandler>();
         services.AddSingleton<IIrcCommandHandler, VersionHandler>();
         services.AddSingleton<IIrcCommandHandler, AdminHandler>();
+        services.AddSingleton<IIrcCommandHandler, InfoHandler>();
+        services.AddSingleton<IIrcCommandHandler, CreditsHandler>();
         services.AddSingleton<IIrcCommandHandler, MotdHandler>();
         services.AddSingleton<IIrcCommandHandler, LinksHandler>();
+        services.AddSingleton<IIrcCommandHandler, MapHandler>();
+        services.AddSingleton<IIrcCommandHandler, ModulesHandler>();
+        services.AddSingleton<IIrcCommandHandler, RulesHandler>();
         services.AddSingleton<IIrcCommandHandler, LusersHandler>();
+        services.AddSingleton<IIrcCommandHandler, StatsHandler>();
+        services.AddSingleton<IIrcCommandHandler, TraceHandler>();
         services.AddSingleton<IIrcCommandHandler, UserhostHandler>();
+        services.AddSingleton<IIrcCommandHandler, WallopsHandler>();
         services.AddSingleton<IIrcCommandHandler, PongHandler>();
         services.AddSingleton<IIrcCommandHandler, OperHandler>();
+        services.AddSingleton<IIrcCommandHandler, KillHandler>();
+        services.AddSingleton<IIrcCommandHandler, MetricsHandler>();
+        services.AddSingleton<IIrcCommandHandler, RehashHandler>();
+        services.AddSingleton<IIrcCommandHandler, SquitHandler>();
+        services.AddSingleton<IIrcCommandHandler, DieHandler>();
+        services.AddSingleton<IIrcCommandHandler, RestartHandler>();
+        services.AddSingleton<IIrcCommandHandler, KlineHandler>();
+        services.AddSingleton<IIrcCommandHandler, UnklineHandler>();
+        services.AddSingleton<IIrcCommandHandler, DlineHandler>();
+        services.AddSingleton<IIrcCommandHandler, UndlineHandler>();
+        services.AddSingleton<IIrcCommandHandler, WhowasHandler>();
 
         services.AddSingleton<CommandDispatcher>();
 

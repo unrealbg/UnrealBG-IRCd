@@ -18,11 +18,17 @@
     {
         private readonly IOptions<IrcOptions> _options;
         private readonly MotdSender _motd;
+        private readonly IMetrics _metrics;
+        private readonly WatchService _watch;
+        private readonly ConnectionAuthService? _auth;
 
-        public RegistrationService(IOptions<IrcOptions> options, MotdSender motd)
+        public RegistrationService(IOptions<IrcOptions> options, MotdSender motd, IMetrics metrics, WatchService watch, ConnectionAuthService? auth = null)
         {
             _options = options;
             _motd = motd;
+            _metrics = metrics;
+            _watch = watch;
+            _auth = auth;
         }
 
         public async ValueTask TryCompleteRegistrationAsync(IClientSession session, ServerState state, CancellationToken ct)
@@ -42,6 +48,8 @@
 
             session.IsRegistered = true;
 
+            _metrics.UserRegistered();
+
             if (state.TryGetUser(session.ConnectionId, out var user) && user is not null)
             {
                 user.Nick = session.Nick;
@@ -54,6 +62,16 @@
                 }
 
                 user.LastActivityUtc = DateTimeOffset.UtcNow;
+
+                if (TryMatchKLine(session.Nick!, session.UserName!, user.Host ?? "localhost", out var reason))
+                {
+                    var serverName2 = _options.Value.ServerInfo?.Name ?? "server";
+                    await session.SendAsync($":{serverName2} 465 {session.Nick} :You are banned from this server ({reason})", ct);
+                    await session.CloseAsync("K-Lined", ct);
+                    return;
+                }
+
+                await _watch.NotifyLogonAsync(state, user, ct);
             }
 
             var nick = session.Nick!;
@@ -62,30 +80,46 @@
             var serverVersion = _options.Value.ServerInfo?.Version ?? "UnrealBG-IRCd";
             var networkName = _options.Value.ServerInfo?.Network ?? "IRCd";
 
+            var clientPort = 6667;
+            if (state.TryGetUser(session.ConnectionId, out var usr) && usr is not null && usr.IsSecureConnection)
+            {
+                clientPort = 6697;
+            }
+
             const string userModeLetters = "ioZ";
             const string channelModeLetters = "bklimnpst";
 
-            const string prefix = "(qaohv)~&@%+";
-            const string chanTypes = "#";
+            var isupport = _options.Value.Isupport ?? new IsupportOptions();
 
-            const string chanModesIsupport = "b,k,l,imnpst";
-            const int nickLen = 20;
-            const int chanLen = 50;
-            const int topicLen = 300;
-            const string caseMapping = "rfc1459";
-            const int maxModes = 12;
-            const string statusMsg = "~&@%+";
-            const string awayLen = "200";
-            const string elist = "MNU";
+            var prefix = string.IsNullOrWhiteSpace(isupport.Prefix) ? "(ov)@+" : isupport.Prefix;
+            var chanTypes = string.IsNullOrWhiteSpace(isupport.ChanTypes) ? "#" : isupport.ChanTypes;
+            var chanModesIsupport = string.IsNullOrWhiteSpace(isupport.ChanModes) ? "b,k,l,imnpst" : isupport.ChanModes;
+            var nickLen = isupport.NickLen > 0 ? isupport.NickLen : 20;
+            var chanLen = isupport.ChanLen > 0 ? isupport.ChanLen : 50;
+            var topicLen = isupport.TopicLen > 0 ? isupport.TopicLen : 300;
+            var caseMapping = string.IsNullOrWhiteSpace(isupport.CaseMapping) ? "rfc1459" : isupport.CaseMapping;
+            var maxModes = isupport.MaxModes > 0 ? isupport.MaxModes : 12;
+            var statusMsg = string.IsNullOrWhiteSpace(isupport.StatusMsg) ? "@+" : isupport.StatusMsg;
+            var awayLen = (isupport.AwayLen > 0 ? isupport.AwayLen : 200).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var elist = string.IsNullOrWhiteSpace(isupport.EList) ? "MNU" : isupport.EList;
+            var kickLen = isupport.KickLen > 0 ? isupport.KickLen : 160;
 
-            await session.SendAsync($":{serverName} 001 {nick} :Welcome to the {networkName} IRC Network {nick}!", ct);
-            await session.SendAsync($":{serverName} 002 {nick} :Your host is {serverName}, running version {serverVersion}", ct);
-            await session.SendAsync($":{serverName} 003 {nick} :This server was created {state.CreatedUtc:O}", ct);
+            if (_auth is not null)
+            {
+                await _auth.AwaitAuthChecksAsync(session.ConnectionId, ct);
+            }
+
+            await session.SendAsync($":{serverName} 001 {nick} :Welcome to the {networkName} Internet Relay Chat Network {nick}", ct);
+            await session.SendAsync($":{serverName} 002 {nick} :Your host is {serverName}[{serverName}/{clientPort}], running version {serverVersion}", ct);
+            await session.SendAsync($":{serverName} 003 {nick} :This server was created {state.CreatedUtc:MMM d yyyy} at {state.CreatedUtc:HH:mm:ss}", ct);
 
             await session.SendAsync($":{serverName} 004 {nick} {serverName} {serverVersion} {userModeLetters} {channelModeLetters}", ct);
 
             await session.SendAsync(
-                $":{serverName} 005 {nick} CHANTYPES={chanTypes} PREFIX={prefix} CHANMODES={chanModesIsupport} USERMODES={userModeLetters} NICKLEN={nickLen} CHANNELLEN={chanLen} TOPICLEN={topicLen} AWAYLEN={awayLen} CASEMAPPING={caseMapping} MODES={maxModes} STATUSMSG={statusMsg} ELIST={elist} NETWORK={networkName} :are supported by this server",
+                $":{serverName} 005 {nick} CALLERID CASEMAPPING={caseMapping} DEAF=D KICKLEN={kickLen} MODES={maxModes} NICKLEN={nickLen} PREFIX={prefix} STATUSMSG={statusMsg} TOPICLEN={topicLen} NETWORK={networkName} MAXLIST=beI:25 MAXTARGETS=4 CHANTYPES={chanTypes} :are supported by this server",
+                ct);
+            await session.SendAsync(
+                $":{serverName} 005 {nick} CHANLIMIT={chanTypes}:25 CHANNELLEN={chanLen} CHANMODES={chanModesIsupport} AWAYLEN={awayLen} ELIST={elist} SAFELIST KNOCK :are supported by this server",
                 ct);
 
             var users = state.UserCount;
@@ -93,12 +127,43 @@
             var ops = 0;
             var channels = state.GetAllChannels().Count();
 
-            await session.SendAsync($":{serverName} 251 {nick} :There are {users} users and {unknown} unknown connections", ct);
-            await session.SendAsync($":{serverName} 252 {nick} {ops} :operator(s) online", ct);
+            await session.SendAsync($":{serverName} 251 {nick} :There are {users} users and {unknown} invisible on 1 servers", ct);
+            await session.SendAsync($":{serverName} 252 {nick} {ops} :IRC Operators online", ct);
             await session.SendAsync($":{serverName} 254 {nick} {channels} :channels formed", ct);
             await session.SendAsync($":{serverName} 255 {nick} :I have {users} clients and 0 servers", ct);
+            await session.SendAsync($":{serverName} 265 {nick} {users} {users} :Current local users: {users}  Max: {users}", ct);
+            await session.SendAsync($":{serverName} 266 {nick} {users} {users} :Current global users: {users}  Max: {users}", ct);
+            await session.SendAsync($":{serverName} 250 {nick} :Highest connection count: {users} ({users} clients) ({users} connections received)", ct);
 
             await _motd.TrySendMotdAsync(session, ct);
+        }
+
+        private bool TryMatchKLine(string nick, string userName, string host, out string reason)
+        {
+            reason = "Banned";
+
+            var klines = _options.Value.KLines;
+            if (klines is null || klines.Length == 0)
+                return false;
+
+            var full = $"{nick}!{userName}@{host}";
+
+            foreach (var k in klines)
+            {
+                if (k is null || string.IsNullOrWhiteSpace(k.Mask))
+                    continue;
+
+                var mask = k.Mask.Trim();
+                var value = (mask.Contains('!') || mask.Contains('@')) ? full : host;
+
+                if (MaskMatcher.IsMatch(mask, value))
+                {
+                    reason = string.IsNullOrWhiteSpace(k.Reason) ? "Banned" : k.Reason;
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 }

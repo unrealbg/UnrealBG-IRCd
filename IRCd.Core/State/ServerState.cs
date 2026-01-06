@@ -74,46 +74,100 @@
             }
         }
 
-        public IReadOnlyCollection<RemoteServer> RemoveRemoteServerTreeByConnection(string connectionId)
+        public (IReadOnlyCollection<RemoteServer> RemovedServers, IReadOnlyCollection<string> RemovedUserUids) RemoveRemoteServerTreeByConnectionDetailed(string connectionId)
         {
-            var roots = _serversBySid.Values
-                .Where(s => string.Equals(s.ConnectionId, connectionId, StringComparison.OrdinalIgnoreCase) && (s.ParentSid is null || !string.Equals(s.ParentSid, s.Sid, StringComparison.OrdinalIgnoreCase)))
-                .ToArray();
-
-            if (roots.Length == 0)
+            if (string.IsNullOrWhiteSpace(connectionId))
             {
-                return Array.Empty<RemoteServer>();
+                return (Array.Empty<RemoteServer>(), Array.Empty<string>());
             }
 
             var snapshot = _serversBySid.Values.ToArray();
+            var seeds = snapshot
+                .Where(s => string.Equals(s.ConnectionId, connectionId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(s.Sid))
+                .Select(s => s.Sid)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            if (seeds.Length == 0)
+            {
+                return (Array.Empty<RemoteServer>(), Array.Empty<string>());
+            }
+
+            var removedSidSet = BuildServerSubtreeSidSet(snapshot, seeds);
+
+            var removedUserUids = _usersByConn.Values
+                .Where(u => u.IsRemote && !string.IsNullOrWhiteSpace(u.RemoteSid) && removedSidSet.Contains(u.RemoteSid!) && !string.IsNullOrWhiteSpace(u.Uid))
+                .Select(u => u.Uid!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            var removedServers = RemoveRemoteServersBySidSet(removedSidSet);
+
+            foreach (var u in _usersByConn.Values.Where(u => u.IsRemote && !string.IsNullOrWhiteSpace(u.RemoteSid) && removedSidSet.Contains(u.RemoteSid!)).ToArray())
+            {
+                RemoveUser(u.ConnectionId);
+            }
+
+            return (removedServers, removedUserUids);
+        }
+
+        public IReadOnlyCollection<RemoteServer> RemoveRemoteServerTreeBySid(string rootSid)
+            => RemoveRemoteServerTreeBySidDetailed(rootSid).RemovedServers;
+
+        public (IReadOnlyCollection<RemoteServer> RemovedServers, IReadOnlyCollection<string> RemovedUserUids) RemoveRemoteServerTreeBySidDetailed(string rootSid)
+        {
+            if (string.IsNullOrWhiteSpace(rootSid))
+            {
+                return (Array.Empty<RemoteServer>(), Array.Empty<string>());
+            }
+
+            var snapshot = _serversBySid.Values.ToArray();
+            if (!snapshot.Any(s => string.Equals(s.Sid, rootSid, StringComparison.OrdinalIgnoreCase)))
+            {
+                return (Array.Empty<RemoteServer>(), Array.Empty<string>());
+            }
+
+            var removedSidSet = BuildServerSubtreeSidSet(snapshot, new[] { rootSid });
+
+            var removedUserUids = _usersByConn.Values
+                .Where(u => u.IsRemote && !string.IsNullOrWhiteSpace(u.RemoteSid) && removedSidSet.Contains(u.RemoteSid!) && !string.IsNullOrWhiteSpace(u.Uid))
+                .Select(u => u.Uid!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            var removedServers = RemoveRemoteServersBySidSet(removedSidSet);
+
+            foreach (var u in _usersByConn.Values.Where(u => u.IsRemote && !string.IsNullOrWhiteSpace(u.RemoteSid) && removedSidSet.Contains(u.RemoteSid!)).ToArray())
+            {
+                RemoveUser(u.ConnectionId);
+            }
+
+            return (removedServers, removedUserUids);
+        }
+
+        private static HashSet<string> BuildServerSubtreeSidSet(RemoteServer[] snapshot, IEnumerable<string> roots)
+        {
             var childrenByParent = snapshot
                 .Where(s => !string.IsNullOrWhiteSpace(s.ParentSid) && !string.IsNullOrWhiteSpace(s.Sid))
                 .GroupBy(s => s.ParentSid!, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.Select(x => x.Sid).ToArray(), StringComparer.OrdinalIgnoreCase);
+                .ToDictionary(g => g.Key, g => g.Select(x => x.Sid).Where(x => !string.IsNullOrWhiteSpace(x)).ToArray(), StringComparer.OrdinalIgnoreCase);
 
-            var removed = new List<RemoteServer>();
+            var removedSidSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var toRemove = new Queue<string>();
             foreach (var r in roots)
             {
-                if (!string.IsNullOrWhiteSpace(r.Sid))
+                if (!string.IsNullOrWhiteSpace(r))
                 {
-                    toRemove.Enqueue(r.Sid);
+                    toRemove.Enqueue(r);
                 }
             }
 
             while (toRemove.Count > 0)
             {
                 var sid = toRemove.Dequeue();
-
-                if (_serversBySid.TryRemove(sid, out var srv) && srv is not null)
+                if (!removedSidSet.Add(sid))
                 {
-                    removed.Add(srv);
-                    _nextHopBySid.TryRemove(srv.Sid, out _);
-
-                    if (!string.IsNullOrWhiteSpace(srv.ConnectionId))
-                    {
-                        _serversByConn.TryRemove(srv.ConnectionId, out _);
-                    }
+                    continue;
                 }
 
                 if (childrenByParent.TryGetValue(sid, out var children))
@@ -128,14 +182,35 @@
                 }
             }
 
-            var removedSet = new HashSet<string>(removed.Select(r => r.Sid), StringComparer.OrdinalIgnoreCase);
-            foreach (var u in _usersByConn.Values.Where(u => u.IsRemote && !string.IsNullOrWhiteSpace(u.RemoteSid) && removedSet.Contains(u.RemoteSid!)).ToArray())
+            return removedSidSet;
+        }
+
+        private IReadOnlyCollection<RemoteServer> RemoveRemoteServersBySidSet(HashSet<string> sidSet)
+        {
+            var removed = new List<RemoteServer>();
+            foreach (var sid in sidSet)
             {
-                RemoveUser(u.ConnectionId);
+                if (_serversBySid.TryRemove(sid, out var srv) && srv is not null)
+                {
+                    removed.Add(srv);
+                    _nextHopBySid.TryRemove(srv.Sid, out _);
+
+                    if (!string.IsNullOrWhiteSpace(srv.ConnectionId))
+                    {
+                        _serversByConn.TryRemove(srv.ConnectionId, out _);
+                    }
+                }
+                else
+                {
+                    _nextHopBySid.TryRemove(sid, out _);
+                }
             }
 
             return removed;
         }
+
+        public IReadOnlyCollection<RemoteServer> RemoveRemoteServerTreeByConnection(string connectionId)
+            => RemoveRemoteServerTreeByConnectionDetailed(connectionId).RemovedServers;
 
         public bool TryGetRemoteServerByConnection(string connectionId, out RemoteServer? server)
             => _serversByConn.TryGetValue(connectionId, out server);
@@ -169,7 +244,28 @@
 
         public bool TryAddUser(User user)
         {
+            var hasNick = !string.IsNullOrWhiteSpace(user.Nick);
+            if (hasNick)
+            {
+                if (_nickToConn.TryGetValue(user.Nick!, out var existingConn) && !string.Equals(existingConn, user.ConnectionId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                _nickToConn[user.Nick!] = user.ConnectionId;
+            }
+
             var ok = _usersByConn.TryAdd(user.ConnectionId, user);
+            if (!ok)
+            {
+                if (hasNick)
+                {
+                    _nickToConn.TryRemove(user.Nick!, out _);
+                }
+
+                return false;
+            }
+
             _userChannels.TryAdd(user.ConnectionId, new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase));
 
             if (!string.IsNullOrWhiteSpace(user.Uid))
@@ -177,7 +273,7 @@
                 _usersByUid[user.Uid!] = user;
             }
 
-            return ok;
+            return true;
         }
 
         public bool TryAddRemoteUser(User user)
@@ -277,8 +373,9 @@
                 return false;
             }
 
+            // First member gets Owner, others get Normal - ChanServ will adjust for registered channels
             var priv = !channel.Members.Any()
-                ? ChannelPrivilege.Owner
+                ? ChannelPrivilege.Op
                 : ChannelPrivilege.Normal;
 
             if (!channel.TryAddMember(connectionId, nick, priv))
@@ -440,10 +537,7 @@
             var privToSet = modeChar switch
             {
                 'v' => ChannelPrivilege.Voice,
-                'h' => ChannelPrivilege.HalfOp,
                 'o' => ChannelPrivilege.Op,
-                'a' => ChannelPrivilege.Admin,
-                'q' => ChannelPrivilege.Owner,
                 _ => ChannelPrivilege.Normal
             };
 
@@ -455,9 +549,7 @@
 
             var required = modeChar switch
             {
-                'v' or 'h' or 'o' => ChannelPrivilege.Op,
-                'a' => ChannelPrivilege.Admin,
-                'q' => ChannelPrivilege.Owner,
+                'v' or 'o' => ChannelPrivilege.Op,
                 _ => ChannelPrivilege.Op
             };
 
@@ -520,6 +612,18 @@
                 user.Modes &= ~mode;
             }
 
+            return true;
+        }
+
+        public bool TrySetOperInfo(string connectionId, string? operName, string? operClass)
+        {
+            if (!_usersByConn.TryGetValue(connectionId, out var user))
+            {
+                return false;
+            }
+
+            user.OperName = string.IsNullOrWhiteSpace(operName) ? null : operName;
+            user.OperClass = string.IsNullOrWhiteSpace(operClass) ? null : operClass;
             return true;
         }
     }

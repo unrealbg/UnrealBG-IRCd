@@ -17,4 +17,8 @@ public sealed class CommandLimitsOptions
     public int MaxPrivmsgTargets { get; set; } = 4;
 
     public int MaxNoticeTargets { get; set; } = 4;
+
+    public int MaxSilenceEntries { get; set; } = 15;
+
+    public int MaxWatchEntries { get; set; } = 128;
 }

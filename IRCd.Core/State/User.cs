@@ -24,9 +24,15 @@
 
         public string? Host { get; set; }
 
+        public string? RemoteIp { get; set; }
+
         public bool IsSecureConnection { get; set; }
 
         public bool IsRegistered { get; set; }
+
+        public string? OperName { get; set; }
+
+        public string? OperClass { get; set; }
 
         public UserModes Modes { get; set; } = UserModes.None;
 

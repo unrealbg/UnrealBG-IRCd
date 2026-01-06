@@ -4,10 +4,10 @@
     {
         public static char? ToPrefix(this ChannelPrivilege p) => p switch
         {
-            ChannelPrivilege.Owner => '*',
-            ChannelPrivilege.Admin => '&',
+            ChannelPrivilege.Owner => '@',
+            ChannelPrivilege.Admin => '@',
             ChannelPrivilege.Op => '@',
-            ChannelPrivilege.HalfOp => '%',
+            ChannelPrivilege.HalfOp => '@',
             ChannelPrivilege.Voice => '+',
             _ => null
         };

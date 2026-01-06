@@ -9,6 +9,7 @@
     using IRCd.Core.Abstractions;
     using IRCd.Core.Commands.Contracts;
     using IRCd.Core.Protocol;
+    using IRCd.Core.Services;
     using IRCd.Core.State;
 
     using IRCd.Shared.Options;
@@ -20,26 +21,30 @@
         public string Command => "WHOIS";
 
         private readonly ISessionRegistry _sessions;
-
         private readonly IOptions<IrcOptions> _options;
+        private readonly IServiceSessionEvents? _serviceEvents;
 
-        public WhoisHandler(ISessionRegistry sessions, IOptions<IrcOptions> options)
+        public WhoisHandler(ISessionRegistry sessions, IOptions<IrcOptions> options, IServiceSessionEvents? serviceEvents = null)
         {
             _sessions = sessions;
             _options = options;
+            _serviceEvents = serviceEvents;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
+            var localServerName = _options.Value.ServerInfo?.Name ?? "server";
+            var localServerDesc = _options.Value.ServerInfo?.Description ?? "IRCd";
+
             if (!session.IsRegistered)
             {
-                await session.SendAsync($":server 451 {(session.Nick ?? "*")} :You have not registered", ct);
+                await session.SendAsync($":{localServerName} 451 {(session.Nick ?? "*")} :You have not registered", ct);
                 return;
             }
 
             if (msg.Params.Count < 1)
             {
-                await session.SendAsync($":server 461 {session.Nick} WHOIS :Not enough parameters", ct);
+                await session.SendAsync($":{localServerName} 461 {session.Nick} WHOIS :Not enough parameters", ct);
                 return;
             }
 
@@ -52,7 +57,7 @@
 
             if (targets.Length > maxTargets)
             {
-                await session.SendAsync($":server 407 {me} :Too many targets", ct);
+                await session.SendAsync($":{localServerName} 407 {me} :Too many targets", ct);
                 return;
             }
 
@@ -60,22 +65,22 @@
 
             if (!IrcValidation.IsValidNick(targetNick, out _))
             {
-                await session.SendAsync($":server 401 {me} {targetNick} :No such nick", ct);
-                await session.SendAsync($":server 318 {me} {targetNick} :End of /WHOIS list.", ct);
+                await session.SendAsync($":{localServerName} 401 {me} {targetNick} :No such nick", ct);
+                await session.SendAsync($":{localServerName} 318 {me} {targetNick} :End of /WHOIS list.", ct);
                 return;
             }
 
             if (!state.TryGetConnectionIdByNick(targetNick, out var targetConn) || targetConn is null)
             {
-                await session.SendAsync($":server 401 {me} {targetNick} :No such nick", ct);
-                await session.SendAsync($":server 318 {me} {targetNick} :End of /WHOIS list.", ct);
+                await session.SendAsync($":{localServerName} 401 {me} {targetNick} :No such nick", ct);
+                await session.SendAsync($":{localServerName} 318 {me} {targetNick} :End of /WHOIS list.", ct);
                 return;
             }
 
             if (!state.TryGetUser(targetConn, out var targetUser) || targetUser is null)
             {
-                await session.SendAsync($":server 401 {me} {targetNick} :No such nick", ct);
-                await session.SendAsync($":server 318 {me} {targetNick} :End of /WHOIS list.", ct);
+                await session.SendAsync($":{localServerName} 401 {me} {targetNick} :No such nick", ct);
+                await session.SendAsync($":{localServerName} 318 {me} {targetNick} :End of /WHOIS list.", ct);
                 return;
             }
 
@@ -83,11 +88,11 @@
             var host = state.GetHostFor(targetConn);
             var realName = string.IsNullOrWhiteSpace(targetUser.RealName) ? "Unknown" : targetUser.RealName!;
 
-            await session.SendAsync($":server 311 {me} {targetUser.Nick} {userName} {host} * :{realName}", ct);
+            await session.SendAsync($":{localServerName} 311 {me} {targetUser.Nick} {userName} {host} * :{realName}", ct);
 
             if (!string.IsNullOrWhiteSpace(targetUser.AwayMessage))
             {
-                await session.SendAsync($":server 301 {me} {targetUser.Nick} :{targetUser.AwayMessage}", ct);
+                await session.SendAsync($":{localServerName} 301 {me} {targetUser.Nick} :{targetUser.AwayMessage}", ct);
             }
 
             var secure = targetUser.IsSecureConnection;
@@ -97,36 +102,49 @@
                 secure = targetSession.IsSecureConnection;
             }
 
-            if (secure)
-            {
-                await session.SendAsync($":server 671 {me} {targetUser.Nick} :is using a secure connection", ct);
-            }
-
-            if (targetUser.Modes.HasFlag(UserModes.Operator))
-            {
-                await session.SendAsync($":server 313 {me} {targetUser.Nick} :is an IRC operator", ct);
-            }
-
-            var localServerName = _options.Value.ServerInfo?.Name ?? "server";
-            var localServerDesc = _options.Value.ServerInfo?.Description ?? "IRCd";
-
             var shownServer = localServerName;
+            var shownServerDesc = localServerDesc;
             if (targetUser.IsRemote && !string.IsNullOrWhiteSpace(targetUser.RemoteSid))
             {
                 if (state.TryGetRemoteServerBySid(targetUser.RemoteSid!, out var rs) && rs is not null && !string.IsNullOrWhiteSpace(rs.Name))
                 {
                     shownServer = rs.Name!;
+                    shownServerDesc = string.IsNullOrWhiteSpace(rs.Description) ? localServerDesc : rs.Description;
                 }
             }
 
-            await session.SendAsync($":{localServerName} 312 {me} {targetUser.Nick} {shownServer} :{localServerDesc}", ct);
+            await session.SendAsync($":{localServerName} 312 {me} {targetUser.Nick} {shownServer} :{shownServerDesc}", ct);
+
+            if (_serviceEvents is not null)
+            {
+                var nickForCheck = targetUser.Nick ?? string.Empty;
+                if (await _serviceEvents.IsIdentifiedForNickAsync(targetConn, nickForCheck, ct))
+                {
+                    await session.SendAsync($":{localServerName} 307 {me} {targetUser.Nick} :has identified for this nickname", ct);
+                }
+            }
+
+            if (targetUser.Modes.HasFlag(UserModes.Operator))
+            {
+                await session.SendAsync($":{localServerName} 313 {me} {targetUser.Nick} :is an IRC Operator", ct);
+
+                if (IsNetAdmin(_options.Value, targetUser))
+                {
+                    await session.SendAsync($":{localServerName} 320 {me} {targetUser.Nick} :is a Network Administrator", ct);
+                }
+            }
+
+            if (secure)
+            {
+                await session.SendAsync($":{localServerName} 671 {me} {targetUser.Nick} :is using a secure connection", ct);
+            }
 
             await session.SendAsync($":{localServerName} 378 {me} {targetUser.Nick} :is connecting from *@{host}", ct);
 
             var chanList = BuildWhoisChannelList(requesterConnId: session.ConnectionId, targetConnId: targetConn, state);
             if (chanList.Count > 0)
             {
-                await session.SendAsync($":server 319 {me} {targetUser.Nick} :{string.Join(' ', chanList)}", ct);
+                await session.SendAsync($":{localServerName} 319 {me} {targetUser.Nick} :{string.Join(' ', chanList)}", ct);
             }
 
             var modeLetters = new List<char>();
@@ -135,7 +153,7 @@
 
             if (modeLetters.Count > 0)
             {
-                await session.SendAsync($":server 379 {me} {targetUser.Nick} :is using modes +{new string(modeLetters.ToArray())}", ct);
+                await session.SendAsync($":{localServerName} 379 {me} {targetUser.Nick} :is using modes +{new string(modeLetters.ToArray())}", ct);
             }
 
             var now = DateTimeOffset.UtcNow;
@@ -151,10 +169,32 @@
             var idleSeconds = (long)Math.Max(0, (now - lastActivity).TotalSeconds);
 
             await session.SendAsync(
-                $":server 317 {me} {targetUser.Nick} {idleSeconds} {connectedAt.ToUnixTimeSeconds()} :seconds idle, signon time",
+                $":{localServerName} 317 {me} {targetUser.Nick} {idleSeconds} {connectedAt.ToUnixTimeSeconds()} :seconds idle, signon time",
                 ct);
 
-            await session.SendAsync($":server 318 {me} {targetUser.Nick} :End of /WHOIS list.", ct);
+            await session.SendAsync($":{localServerName} 318 {me} {targetUser.Nick} :End of /WHOIS list.", ct);
+        }
+
+        private static bool IsNetAdmin(IrcOptions options, User user)
+        {
+            if (user is null)
+                return false;
+
+            if (!user.Modes.HasFlag(UserModes.Operator))
+                return false;
+
+            if (string.IsNullOrWhiteSpace(user.OperClass))
+                return false;
+
+            var cls = options.Classes.FirstOrDefault(c =>
+                c is not null
+                && !string.IsNullOrWhiteSpace(c.Name)
+                && string.Equals(c.Name, user.OperClass, StringComparison.OrdinalIgnoreCase));
+
+            if (cls?.Capabilities is null || cls.Capabilities.Length == 0)
+                return false;
+
+            return cls.Capabilities.Any(c => string.Equals(c, "netadmin", StringComparison.OrdinalIgnoreCase));
         }
 
         private static List<string> BuildWhoisChannelList(string requesterConnId, string targetConnId, ServerState state)

@@ -1,2 +1,41 @@
-﻿Welcome to UnrealBG IRCd
-Be nice. No flooding.
+﻿   ___  ___                  _  ____   ____       _________  ______    __
+  / / / / /___  _________ _/ / / __ ) / ___/     /  _/ __ \/ ____/___/ /
+ / / / / / __ \/ ___/ __ `/ / / __  |/ / ______  / // /_/ / /   / __  / 
+/ /_/ / / / / / /  / /_/ / / / /_/ / /_/ /___/ _/ // _, _/ /___/ /_/ /  
+\____/_/_/ /_/_/   \__,_/_/_/_____/\____/     /___/_/ |_|\____/\__,_/   
+
+═══════════════════════════════════════════════════════════════════════
+ Welcome to the UnrealBG Internet Relay Chat Network
+═══════════════════════════════════════════════════════════════════════
+
+ Server: irc.unrealbg.com
+ Network: UnrealBG
+ Support: #help
+
+═══════════════════════════════════════════════════════════════════════
+ RULES AND GUIDELINES
+═══════════════════════════════════════════════════════════════════════
+
+ • Be respectful to other users
+ • No flooding or spam
+ • No warez, illegal content, or piracy
+ • Keep channels family-friendly unless marked as adult
+ • Register your nickname: /msg NickServ HELP REGISTER
+ • Register your channel: /msg ChanServ HELP REGISTER
+
+═══════════════════════════════════════════════════════════════════════
+ SERVICES AVAILABLE
+═══════════════════════════════════════════════════════════════════════
+
+ NickServ - Nickname registration and protection
+ ChanServ - Channel registration and management
+ OperServ - Network operator services
+
+ For help: /msg <service> HELP
+
+═══════════════════════════════════════════════════════════════════════
+
+ Thank you for using UnrealBG IRCd!
+ Enjoy your stay!
+
+═══════════════════════════════════════════════════════════════════════

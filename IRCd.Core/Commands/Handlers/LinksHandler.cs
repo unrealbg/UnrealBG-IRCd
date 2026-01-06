@@ -34,10 +34,14 @@ namespace IRCd.Core.Commands.Handlers
             var me = session.Nick ?? "*";
 
             var srv = _options.Value.ServerInfo?.Name ?? "server";
+            var desc = _options.Value.ServerInfo?.Description ?? "IRCd";
+
+            await session.SendAsync($":{srv} 364 {me} {srv} * :0 {desc}", ct);
 
             foreach (var s in state.GetRemoteServers())
             {
-                await session.SendAsync($":{srv} 364 {me} {s.Name} {s.Name} :0 {s.Description}", ct);
+                var remoteDesc = string.IsNullOrWhiteSpace(s.Description) ? "IRCd" : s.Description;
+                await session.SendAsync($":{srv} 364 {me} {s.Name} * :1 {remoteDesc}", ct);
             }
 
             await session.SendAsync($":{srv} 365 {me} * :End of /LINKS list.", ct);

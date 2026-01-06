@@ -17,11 +17,19 @@
 
         private readonly RoutingService _routing;
         private readonly ServerLinkService _links;
+        private readonly WhowasService _whowas;
+        private readonly SilenceService _silence;
+        private readonly WatchService _watch;
+        private readonly IServiceSessionEvents? _serviceEvents;
 
-        public QuitHandler(RoutingService routing, ServerLinkService links)
+        public QuitHandler(RoutingService routing, ServerLinkService links, WhowasService whowas, SilenceService silence, WatchService watch, IServiceSessionEvents? serviceEvents = null)
         {
             _routing = routing;
             _links = links;
+            _whowas = whowas;
+            _silence = silence;
+            _watch = watch;
+            _serviceEvents = serviceEvents;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -67,8 +75,19 @@
 
                 if (state.TryGetUser(session.ConnectionId, out var u) && u is not null && !string.IsNullOrWhiteSpace(u.Uid))
                 {
+                    _whowas.Record(u, explicitNick: nick, signoff: reason);
                     await _links.PropagateQuitAsync(u.Uid!, reason, ct);
                 }
+
+                await _watch.NotifyLogoffAsync(state, nick, user, host, ct);
+            }
+
+            _silence.RemoveAll(session.ConnectionId);
+            _watch.RemoveAll(session.ConnectionId);
+
+            if (_serviceEvents is not null)
+            {
+                await _serviceEvents.OnQuitAsync(session.ConnectionId, ct);
             }
 
             await session.CloseAsync(reason, ct);

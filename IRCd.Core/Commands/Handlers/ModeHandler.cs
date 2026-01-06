@@ -18,11 +18,13 @@
 
         private readonly RoutingService _routing;
         private readonly ServerLinkService _links;
+        private readonly IServiceChannelEvents? _channelEvents;
 
-        public ModeHandler(RoutingService routing, ServerLinkService links)
+        public ModeHandler(RoutingService routing, ServerLinkService links, IServiceChannelEvents? channelEvents = null)
         {
             _routing = routing;
             _links = links;
+            _channelEvents = channelEvents;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -339,6 +341,16 @@
             var line = $":{nick}!{userName2}@localhost MODE {target} {modeOut}{argsOut}";
             await _routing.BroadcastToChannelAsync(finalChannel, line, excludeConnectionId: null, ct);
 
+            if (_channelEvents is not null)
+            {
+                await _channelEvents.OnChannelModeChangedAsync(session, finalChannel, state, ct);
+            }
+
+            if (!state.TryGetChannel(target, out finalChannel) || finalChannel is null)
+            {
+                return;
+            }
+
             await _links.PropagateChannelModesAsync(target, finalChannel.CreatedTs, finalChannel.FormatModeString(), ct);
 
             var key = finalChannel.Key ?? string.Empty;
@@ -435,11 +447,15 @@
 
                 var enable = sign == '+';
                 if (state.TrySetUserMode(session.ConnectionId, UserModes.Invisible, enable))
+                {
                     changed = true;
+                }
             }
 
             if (!changed)
+            {
                 return;
+            }
 
             var userName = session.UserName ?? "u";
             var host = "localhost";
@@ -449,9 +465,21 @@
         private static string FormatUserModes(UserModes modes)
         {
             var letters = new List<char>();
-            if (modes.HasFlag(UserModes.Invisible)) letters.Add('i');
-            if (modes.HasFlag(UserModes.Secure)) letters.Add('Z');
-            if (modes.HasFlag(UserModes.Operator)) letters.Add('o');
+            if (modes.HasFlag(UserModes.Invisible))
+            {
+                letters.Add('i');
+            }
+
+            if (modes.HasFlag(UserModes.Secure))
+            {
+                letters.Add('Z');
+            }
+
+            if (modes.HasFlag(UserModes.Operator))
+            {
+                letters.Add('o');
+            }
+
             return "+" + new string(letters.ToArray());
         }
 

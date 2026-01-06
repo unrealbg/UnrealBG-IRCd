@@ -57,7 +57,8 @@ namespace IRCd.Core.Services
                     await TryConnectOnceAsync(link, stoppingToken);
                 }
 
-                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                var scanSeconds = _options.CurrentValue.Transport?.S2S?.OutboundScanIntervalSeconds ?? 10;
+                await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, scanSeconds)), stoppingToken);
             }
         }
 
@@ -66,7 +67,11 @@ namespace IRCd.Core.Services
             if (!_failures.TryGetValue(link.Name, out var n) || n <= 0)
                 return 0;
 
-            var s = Math.Min(30, 1 << Math.Min(4, n - 1));
+            var s2s = _options.CurrentValue.Transport?.S2S;
+            var maxSeconds = s2s?.OutboundBackoffMaxSeconds ?? 30;
+            var maxExponent = s2s?.OutboundBackoffMaxExponent ?? 4;
+
+            var s = Math.Min(maxSeconds, 1 << Math.Min(maxExponent, n - 1));
             return s;
         }
 
@@ -80,7 +85,8 @@ namespace IRCd.Core.Services
                 await client.ConnectAsync(link.Host, link.Port, ct);
 
                 var connId = Guid.NewGuid().ToString("N");
-                var session = new OutboundTcpServerLinkSession(connId, client)
+                var cap = _options.CurrentValue.Transport?.Queues?.ServerLinkSendQueueCapacity ?? 2048;
+                var session = new OutboundTcpServerLinkSession(connId, client, cap)
                 {
                     UserSyncEnabled = link.UserSync
                 };
@@ -95,7 +101,8 @@ namespace IRCd.Core.Services
             }
             catch (Exception ex)
             {
-                _failures.AddOrUpdate(link.Name, 1, (_, v) => Math.Min(v + 1, 10));
+                var failureLimit = _options.CurrentValue.Transport?.S2S?.OutboundFailureLimit ?? 10;
+                _failures.AddOrUpdate(link.Name, 1, (_, v) => Math.Min(v + 1, failureLimit));
                 _logger.LogDebug(ex, "S2S outbound connect failed to {Name} {Host}:{Port}", link.Name, link.Host, link.Port);
             }
         }
@@ -108,7 +115,7 @@ namespace IRCd.Core.Services
             private readonly Channel<string> _outgoing;
             private int _closed;
 
-            public OutboundTcpServerLinkSession(string connectionId, TcpClient client)
+            public OutboundTcpServerLinkSession(string connectionId, TcpClient client, int outgoingQueueCapacity)
             {
                 ConnectionId = connectionId;
                 _client = client;
@@ -123,7 +130,8 @@ namespace IRCd.Core.Services
 
                 RemoteEndPoint = client.Client.RemoteEndPoint ?? new IPEndPoint(IPAddress.None, 0);
 
-                _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(2048)
+                var cap = outgoingQueueCapacity > 0 ? outgoingQueueCapacity : 2048;
+                _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(cap)
                 {
                     SingleReader = true,
                     SingleWriter = false,

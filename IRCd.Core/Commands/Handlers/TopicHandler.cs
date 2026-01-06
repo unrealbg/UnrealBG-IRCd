@@ -16,11 +16,13 @@
 
         private readonly RoutingService _routing;
         private readonly ServerLinkService _links;
+        private readonly IServiceChannelEvents? _channelEvents;
 
-        public TopicHandler(RoutingService routing, ServerLinkService links)
+        public TopicHandler(RoutingService routing, ServerLinkService links, IServiceChannelEvents? channelEvents = null)
         {
             _routing = routing;
             _links = links;
+            _channelEvents = channelEvents;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -101,9 +103,16 @@
             newTopic = newTopic?.Trim();
 
             var setBy = $"{me}!{(session.UserName ?? "u")}@localhost";
+            var beforeTopic = channel.Topic;
             channel.TrySetTopicWithTs(newTopic, setBy, ChannelTimestamps.NowTs());
 
-            var topicLine = $":{setBy} TOPIC {channelNameNN} :{channel.Topic ?? string.Empty}";
+            if (_channelEvents is not null)
+            {
+                await _channelEvents.OnChannelTopicChangedAsync(session, channel, beforeTopic, state, ct);
+            }
+
+            var finalSetBy = channel.TopicSetBy ?? setBy;
+            var topicLine = $":{finalSetBy} TOPIC {channelNameNN} :{channel.Topic ?? string.Empty}";
             await _routing.BroadcastToChannelAsync(channel, topicLine, excludeConnectionId: null, ct);
 
             if (state.TryGetUser(session.ConnectionId, out var u) && u is not null && !string.IsNullOrWhiteSpace(u.Uid))
