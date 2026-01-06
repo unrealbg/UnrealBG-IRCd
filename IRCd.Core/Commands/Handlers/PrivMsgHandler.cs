@@ -21,13 +21,17 @@
         private readonly ServerLinkService _links;
         private readonly HostmaskService _hostmask;
         private readonly IOptions<IrcOptions> _options;
+        private readonly SilenceService _silence;
+        private readonly IServiceCommandDispatcher? _services;
 
-        public PrivMsgHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask, IOptions<IrcOptions> options)
+        public PrivMsgHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask, IOptions<IrcOptions> options, SilenceService silence, IServiceCommandDispatcher? services = null)
         {
             _routing = routing;
             _links = links;
             _hostmask = hostmask;
             _options = options;
+            _silence = silence;
+            _services = services;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -56,6 +60,7 @@
             var fromUser = session.UserName ?? "u";
             var host = _hostmask.GetDisplayedHost((session.RemoteEndPoint as System.Net.IPEndPoint)?.Address);
             var prefix = $":{fromNick}!{fromUser}@{host}";
+            var fromHostmask = $"{fromNick}!{fromUser}@{host}";
 
             foreach (var t in targets)
             {
@@ -114,9 +119,22 @@
                     continue;
                 }
 
+                if (_services is not null)
+                {
+                    if (await _services.TryHandlePrivmsgAsync(session, t, text, state, ct))
+                    {
+                        continue;
+                    }
+                }
+
                 if (!state.TryGetConnectionIdByNick(t, out var targetConn) || targetConn is null)
                 {
                     await session.SendAsync($":server 401 {fromNick} {t} :No such nick", ct);
+                    continue;
+                }
+
+                if (state.TryGetUser(targetConn, out var toU) && toU is not null && !toU.IsRemote && _silence.IsSilenced(targetConn, fromHostmask))
+                {
                     continue;
                 }
 

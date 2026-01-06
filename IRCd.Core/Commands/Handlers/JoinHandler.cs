@@ -19,12 +19,16 @@
         private readonly RoutingService _routing;
         private readonly ServerLinkService _links;
         private readonly HostmaskService _hostmask;
+        private readonly IMetrics _metrics;
+        private readonly IServiceChannelEvents? _channelEvents;
 
-        public JoinHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask)
+        public JoinHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask, IMetrics metrics, IServiceChannelEvents? channelEvents = null)
         {
             _routing = routing;
             _links = links;
             _hostmask = hostmask;
+            _metrics = metrics;
+            _channelEvents = channelEvents;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -81,6 +85,8 @@
         {
             var nick = session.Nick!;
 
+            var existedBefore = state.TryGetChannel(channelName, out var _);
+
             if (!IrcValidation.IsValidChannel(channelName, out _))
             {
                 await session.SendAsync($":server 479 {nick} {channelName} :Illegal channel name", ct);
@@ -134,6 +140,11 @@
                 return;
             }
 
+            if (!existedBefore)
+            {
+                _metrics.ChannelCreated();
+            }
+
             channel.RemoveInvite(nick);
 
             var userName = session.UserName ?? "u";
@@ -141,9 +152,47 @@
             var joinLine = $":{nick}!{userName}@{host2} JOIN :{channelName}";
             await _routing.BroadcastToChannelAsync(channel, joinLine, excludeConnectionId: null, ct);
 
+            var privilegeAfterServices = channel.GetPrivilege(session.ConnectionId);
+            var privilegeChangedByServices = false;
+
+            if (_channelEvents is not null)
+            {
+                var beforeModeString = channel.FormatModeString();
+                var beforeKey = channel.Key;
+                var beforeLimit = channel.UserLimit;
+                var beforePrivilege = channel.GetPrivilege(session.ConnectionId);
+
+                await _channelEvents.OnUserJoinedAsync(session, channel, state, ct);
+
+                if (!channel.Contains(session.ConnectionId))
+                {
+                    return;
+                }
+
+                var afterModeString = channel.FormatModeString();
+                if (!string.Equals(beforeModeString, afterModeString, StringComparison.Ordinal) ||
+                    !string.Equals(beforeKey, channel.Key, StringComparison.Ordinal) ||
+                    beforeLimit != channel.UserLimit)
+                {
+                    await _links.PropagateChannelModesAsync(channelName, channel.CreatedTs, afterModeString, ct);
+
+                    var key = channel.Key ?? string.Empty;
+                    var limit = channel.UserLimit?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+                    await _links.PropagateChannelMetaAsync(channelName, channel.CreatedTs, key, limit, ct);
+                }
+
+                privilegeAfterServices = channel.GetPrivilege(session.ConnectionId);
+                privilegeChangedByServices = privilegeAfterServices != beforePrivilege;
+            }
+
             if (state.TryGetUser(session.ConnectionId, out var u) && u is not null && !string.IsNullOrWhiteSpace(u.Uid))
             {
                 await _links.PropagateJoinAsync(u.Uid!, channelName, ct);
+
+                if (privilegeChangedByServices)
+                {
+                    await _links.PropagateMemberPrivilegeAsync(channelName, u.Uid!, privilegeAfterServices, ct);
+                }
             }
 
             if (string.IsNullOrWhiteSpace(channel.Topic))
