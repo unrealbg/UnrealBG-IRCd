@@ -8,6 +8,8 @@
 
         EndPoint RemoteEndPoint { get; }
 
+        EndPoint LocalEndPoint { get; }
+
         bool IsSecureConnection { get; }
 
         ISet<string> EnabledCapabilities { get; }
