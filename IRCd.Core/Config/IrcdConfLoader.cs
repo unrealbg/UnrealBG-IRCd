@@ -1082,6 +1082,82 @@ namespace IRCd.Core.Config
                         continue;
                     }
 
+                    if (TryConsumeIdent("confirm_email"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        _o.Services.NickServ.RequireEmailConfirmation = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("confirm_expire_hours"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var h))
+                            _o.Services.NickServ.PendingRegistrationExpiryHours = h;
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("smtp_host"))
+                    {
+                        ConsumePunct("=");
+                        _o.Services.NickServ.Smtp.Host = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("smtp_port"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var p))
+                            _o.Services.NickServ.Smtp.Port = p;
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("smtp_ssl"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        _o.Services.NickServ.Smtp.UseSsl = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("smtp_user"))
+                    {
+                        ConsumePunct("=");
+                        _o.Services.NickServ.Smtp.Username = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("smtp_pass"))
+                    {
+                        ConsumePunct("=");
+                        _o.Services.NickServ.Smtp.Password = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("smtp_from"))
+                    {
+                        ConsumePunct("=");
+                        _o.Services.NickServ.Smtp.FromAddress = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("smtp_from_name"))
+                    {
+                        ConsumePunct("=");
+                        _o.Services.NickServ.Smtp.FromName = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
                     ConsumeUnknownStatement();
                 }
             }
