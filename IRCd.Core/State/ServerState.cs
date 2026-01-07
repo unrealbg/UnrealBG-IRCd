@@ -247,6 +247,11 @@
             var hasNick = !string.IsNullOrWhiteSpace(user.Nick);
             if (hasNick)
             {
+                if (NickReservation.IsReservedServiceNick(user.Nick!) && !user.IsService)
+                {
+                    return false;
+                }
+
                 if (_nickToConn.TryGetValue(user.Nick!, out var existingConn) && !string.Equals(existingConn, user.ConnectionId, StringComparison.OrdinalIgnoreCase))
                 {
                     return false;
@@ -280,6 +285,11 @@
         {
             if (string.IsNullOrWhiteSpace(user.Uid) || string.IsNullOrWhiteSpace(user.Nick))
                 return false;
+
+            if (NickReservation.IsReservedServiceNick(user.Nick!) && !user.IsService)
+            {
+                return false;
+            }
 
             if (_usersByUid.ContainsKey(user.Uid!))
             {
@@ -326,6 +336,14 @@
 
         public bool TrySetNick(string connectionId, string newNick)
         {
+            if (NickReservation.IsReservedServiceNick(newNick))
+            {
+                if (!_usersByConn.TryGetValue(connectionId, out var reservingUser) || reservingUser is null || !reservingUser.IsService)
+                {
+                    return false;
+                }
+            }
+
             if (_nickToConn.TryGetValue(newNick, out var existingConn) && existingConn != connectionId)
             {
                 return false;
