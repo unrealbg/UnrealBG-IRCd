@@ -74,6 +74,12 @@ namespace IRCd.Core.Commands.Handlers
                 return;
             }
 
+            if (targetUser.IsService)
+            {
+                await session.SendAsync($":{server} NOTICE {me} :Cannot SVSJOIN services", ct);
+                return;
+            }
+
             if (targetUser.IsRemote)
             {
                 if (string.IsNullOrWhiteSpace(targetUser.Uid) || string.IsNullOrWhiteSpace(targetUser.RemoteSid))

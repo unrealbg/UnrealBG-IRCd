@@ -23,8 +23,9 @@
         private readonly IOptions<IrcOptions> _options;
         private readonly SilenceService _silence;
         private readonly IServiceCommandDispatcher? _services;
+        private readonly IServiceChannelEvents? _channelEvents;
 
-        public PrivMsgHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask, IOptions<IrcOptions> options, SilenceService silence, IServiceCommandDispatcher? services = null)
+        public PrivMsgHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask, IOptions<IrcOptions> options, SilenceService silence, IServiceCommandDispatcher? services = null, IServiceChannelEvents? channelEvents = null)
         {
             _routing = routing;
             _links = links;
@@ -32,6 +33,7 @@
             _options = options;
             _silence = silence;
             _services = services;
+            _channelEvents = channelEvents;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -58,12 +60,20 @@
 
             var fromNick = session.Nick ?? "*";
             var fromUser = session.UserName ?? "u";
-            var host = _hostmask.GetDisplayedHost((session.RemoteEndPoint as System.Net.IPEndPoint)?.Address);
+            var host = state.GetHostFor(session.ConnectionId);
             var prefix = $":{fromNick}!{fromUser}@{host}";
             var fromHostmask = $"{fromNick}!{fromUser}@{host}";
 
             foreach (var t in targets)
             {
+                if (!t.StartsWith('#')
+                    && (!state.TryGetConnectionIdByNick(t, out var existingConn) || existingConn is null)
+                    && _services is not null
+                    && await _services.TryHandlePrivmsgAsync(session, t, text, state, ct))
+                {
+                    continue;
+                }
+
                 if (t.StartsWith('#') && !IrcValidation.IsValidChannel(t, out _))
                 {
                     await session.SendAsync($":server 403 {fromNick} {t} :No such channel", ct);
@@ -111,11 +121,31 @@
                     var line = $"{prefix} PRIVMSG {t} :{text}";
                     await _routing.BroadcastToChannelAsync(channel, line, excludeConnectionId: session.ConnectionId, ct);
 
+                    if (session.EnabledCapabilities.Contains("echo-message"))
+                    {
+                        await session.SendAsync(line, ct);
+                    }
+
+                    if (_channelEvents is not null)
+                    {
+                        await _channelEvents.OnChannelMessageAsync(session, channel, text, state, ct);
+                    }
+
                     if (state.TryGetUser(session.ConnectionId, out var fromU) && fromU is not null && !string.IsNullOrWhiteSpace(fromU.Uid))
                     {
                         await _links.PropagatePrivMsgAsync(fromU.Uid!, t, text, ct);
                     }
 
+                    continue;
+                }
+
+                if (IsCtcpVersion(text) && state.TryGetConnectionIdByNick(t, out var ctcpConn) && ctcpConn is not null
+                    && state.TryGetUser(ctcpConn, out var ctcpUser) && ctcpUser is not null && ctcpUser.IsService)
+                {
+                    var serverName = _options.Value.ServerInfo?.Name ?? "server";
+                    var version = _options.Value.ServerInfo?.Version ?? "UnrealBG-IRCd";
+                    var reply = $":{t}!services@{state.GetHostFor(ctcpConn)} NOTICE {fromNick} :\x01VERSION {serverName} services {version}\x01";
+                    await session.SendAsync(reply, ct);
                     continue;
                 }
 
@@ -146,11 +176,33 @@
                 var privLine = $"{prefix} PRIVMSG {t} :{text}";
                 await _routing.SendToUserAsync(targetConn, privLine, ct);
 
+                if (session.EnabledCapabilities.Contains("echo-message"))
+                {
+                    await session.SendAsync(privLine, ct);
+                }
+
                 if (state.TryGetUser(session.ConnectionId, out var fromU2) && fromU2 is not null && !string.IsNullOrWhiteSpace(fromU2.Uid))
                 {
                     await _links.PropagatePrivMsgAsync(fromU2.Uid!, t, text, ct);
                 }
             }
+        }
+
+        private static bool IsCtcpVersion(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return false;
+            }
+
+            if (text.Length < 2 || text[0] != '\x01' || text[^1] != '\x01')
+            {
+                return false;
+            }
+
+            var inner = text[1..^1].Trim();
+            return inner.Equals("VERSION", System.StringComparison.OrdinalIgnoreCase)
+                || inner.StartsWith("VERSION ", System.StringComparison.OrdinalIgnoreCase);
         }
     }
 }

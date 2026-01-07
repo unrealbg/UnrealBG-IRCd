@@ -28,7 +28,7 @@
         private readonly ISessionRegistry _sessions;
         private readonly HostmaskService _hostmask;
 
-        private readonly RuntimeDLineService _dlines;
+        private readonly BanService _bans;
 
         private readonly RateLimitService _rateLimit;
 
@@ -60,7 +60,7 @@
             RoutingService routing,
             HostmaskService hostmask,
             RateLimitService rateLimit,
-            RuntimeDLineService dlines,
+            BanService bans,
             ServerLinkService links,
             IMetrics metrics,
             ConnectionAuthService? authService = null)
@@ -74,7 +74,7 @@
             _routing = routing;
             _hostmask = hostmask;
             _rateLimit = rateLimit;
-            _dlines = dlines;
+            _bans = bans;
             _links = links;
             _metrics = metrics;
             _authService = authService;
@@ -188,7 +188,8 @@
         {
             var remoteIp = GetRemoteIp(client);
 
-            if (_dlines.TryMatch(remoteIp.ToString(), out var dlineReason))
+            var ipBan = await _bans.TryMatchIpAsync(remoteIp, ct);
+            if (ipBan is not null)
             {
                 try
                 {
@@ -199,7 +200,8 @@
                         AutoFlush = true
                     };
 
-                    await writer.WriteLineAsync($"ERROR :D-Lined ({dlineReason})");
+                    var banText = ipBan.Type == BanType.ZLINE ? "Z-Lined" : "D-Lined";
+                    await writer.WriteLineAsync($"ERROR :{banText} ({ipBan.Reason})");
                 }
                 catch { /* ignore */ }
 

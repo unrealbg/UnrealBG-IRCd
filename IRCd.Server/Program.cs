@@ -70,11 +70,26 @@ var host = Host.CreateDefaultBuilder(args)
         // IRC services (NickServ, etc.)
         services.AddIrcServices();
 
+        // Pseudo users for services
+        services.AddHostedService<ServicesPseudoUsersHostedService>();
+
         // Observability
             services.AddSingleton<WatchService>();
         services.AddSingleton<IMetrics, DefaultMetrics>();
 
         // Core services
+        // Unified ban engine
+        services.AddSingleton<JsonBanRepository>();
+        services.AddSingleton<OptionsBanRepository>();
+        services.AddSingleton<IBanRepository>(sp =>
+            new CompositeBanRepository(
+                sp.GetRequiredService<JsonBanRepository>(),
+                sp.GetRequiredService<OptionsBanRepository>()));
+        services.AddSingleton<BanService>();
+        services.AddSingleton<BanEnforcementService>();
+        services.AddSingleton<IBanEnforcer>(sp => sp.GetRequiredService<BanEnforcementService>());
+        services.AddHostedService(sp => sp.GetRequiredService<BanEnforcementService>());
+
         services.AddSingleton<RegistrationService>();
         services.AddSingleton<RateLimitService>();
         services.AddSingleton<ConnectionGuardService>();
@@ -89,9 +104,13 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<RuntimeKLineService>();
             services.AddSingleton<IIrcCommandHandler, WatchHandler>();
         services.AddSingleton<RuntimeDLineService>();
+        services.AddSingleton<RuntimeDenyService>();
+        services.AddSingleton<RuntimeWarnService>();
+        services.AddSingleton<RuntimeTriggerService>();
         services.AddSingleton<WhowasService>();
 
         // Flood protection
+        services.AddSingleton<FloodService>();
 
         // Command handlers
         services.AddSingleton<IIrcCommandHandler, PingHandler>();
@@ -103,6 +122,22 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IIrcCommandHandler, PartHandler>();
         services.AddSingleton<IIrcCommandHandler, PrivMsgHandler>();
         services.AddSingleton<IIrcCommandHandler, NoticeHandler>();
+        services.AddSingleton<IIrcCommandHandler, NsHandler>();
+        services.AddSingleton<IIrcCommandHandler, NickServCommandHandler>();
+        services.AddSingleton<IIrcCommandHandler, CsHandler>();
+        services.AddSingleton<IIrcCommandHandler, ChanServCommandHandler>();
+        services.AddSingleton<IIrcCommandHandler, OsHandler>();
+        services.AddSingleton<IIrcCommandHandler, OperServCommandHandler>();
+        services.AddSingleton<IIrcCommandHandler, MsHandler>();
+        services.AddSingleton<IIrcCommandHandler, MemoServCommandHandler>();
+        services.AddSingleton<IIrcCommandHandler, SsHandler>();
+        services.AddSingleton<IIrcCommandHandler, SeenServCommandHandler>();
+        services.AddSingleton<IIrcCommandHandler, IsHandler>();
+        services.AddSingleton<IIrcCommandHandler, InfoServCommandHandler>();
+        services.AddSingleton<IIrcCommandHandler, StatServCommandHandler>();
+        services.AddSingleton<IIrcCommandHandler, AdminServCommandHandler>();
+        services.AddSingleton<IIrcCommandHandler, DevServCommandHandler>();
+        services.AddSingleton<IIrcCommandHandler, HelpServCommandHandler>();
         services.AddSingleton<IIrcCommandHandler, QuitHandler>();
         services.AddSingleton<IIrcCommandHandler, NamesHandler>();
         services.AddSingleton<IIrcCommandHandler, WhoHandler>();
@@ -152,6 +187,7 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IIrcCommandHandler, UnklineHandler>();
         services.AddSingleton<IIrcCommandHandler, DlineHandler>();
         services.AddSingleton<IIrcCommandHandler, UndlineHandler>();
+        services.AddSingleton<IIrcCommandHandler, QlineHandler>();
         services.AddSingleton<IIrcCommandHandler, WhowasHandler>();
 
         services.AddSingleton<CommandDispatcher>();

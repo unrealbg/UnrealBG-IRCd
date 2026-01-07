@@ -66,6 +66,14 @@ namespace IRCd.Core.Services
             }
         }
 
+        public void Clear()
+        {
+            lock (_lock)
+            {
+                _options.Value.KLines = Array.Empty<KLineOptions>();
+            }
+        }
+
         public bool TryMatch(string nick, string userName, string host, out string reason)
         {
             reason = "Banned";

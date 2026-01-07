@@ -13,6 +13,9 @@
 
         Moderated = 1 << 5,
         Secret = 1 << 6,
-        Private = 1 << 7
+        Private = 1 << 7,
+        
+        BanException = 1 << 8,
+        InviteException = 1 << 9
     }
 }

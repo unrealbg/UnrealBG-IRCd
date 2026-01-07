@@ -21,13 +21,15 @@
         private readonly HostmaskService _hostmask;
         private readonly IMetrics _metrics;
         private readonly IServiceChannelEvents? _channelEvents;
+        private readonly ISessionRegistry _sessions;
 
-        public JoinHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask, IMetrics metrics, IServiceChannelEvents? channelEvents = null)
+        public JoinHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask, IMetrics metrics, ISessionRegistry sessions, IServiceChannelEvents? channelEvents = null)
         {
             _routing = routing;
             _links = links;
             _hostmask = hostmask;
             _metrics = metrics;
+            _sessions = sessions;
             _channelEvents = channelEvents;
         }
 
@@ -96,12 +98,32 @@
             if (state.TryGetChannel(channelName, out var existing) && existing is not null)
             {
                 var maskUserName = session.UserName ?? "u";
-                var host = _hostmask.GetDisplayedHost((session.RemoteEndPoint as System.Net.IPEndPoint)?.Address);
+                var host = state.GetHostFor(session.ConnectionId);
                 var maskValue = $"{nick}!{maskUserName}@{host}";
 
+                var isBanned = false;
                 foreach (var ban in existing.Bans)
                 {
                     if (MaskMatcher.IsMatch(ban.Mask, maskValue))
+                    {
+                        isBanned = true;
+                        break;
+                    }
+                }
+
+                if (isBanned)
+                {
+                    var hasException = false;
+                    foreach (var except in existing.ExceptBans)
+                    {
+                        if (MaskMatcher.IsMatch(except.Mask, maskValue))
+                        {
+                            hasException = true;
+                            break;
+                        }
+                    }
+
+                    if (!hasException)
                     {
                         await session.SendAsync($":server 474 {nick} {channelName} :Cannot join channel (+b)", ct);
                         return;
@@ -115,11 +137,27 @@
                     return;
                 }
 
-                if (existing.Modes.HasFlag(ChannelModes.InviteOnly) &&
-                    !existing.IsInvited(nick))
+                if (existing.Modes.HasFlag(ChannelModes.InviteOnly))
                 {
-                    await session.SendAsync($":server 473 {nick} {channelName} :Cannot join channel (+i)", ct);
-                    return;
+                    var isInvited = existing.IsInvited(nick);
+                    
+                    if (!isInvited)
+                    {
+                        foreach (var inviteExcept in existing.InviteExceptions)
+                        {
+                            if (MaskMatcher.IsMatch(inviteExcept.Mask, maskValue))
+                            {
+                                isInvited = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!isInvited)
+                    {
+                        await session.SendAsync($":server 473 {nick} {channelName} :Cannot join channel (+i)", ct);
+                        return;
+                    }
                 }
 
                 if (existing.Modes.HasFlag(ChannelModes.Key) &&
@@ -148,9 +186,34 @@
             channel.RemoveInvite(nick);
 
             var userName = session.UserName ?? "u";
-            var host2 = _hostmask.GetDisplayedHost((session.RemoteEndPoint as System.Net.IPEndPoint)?.Address);
-            var joinLine = $":{nick}!{userName}@{host2} JOIN :{channelName}";
-            await _routing.BroadcastToChannelAsync(channel, joinLine, excludeConnectionId: null, ct);
+            var host2 = state.GetHostFor(session.ConnectionId);
+            
+            foreach (var member in channel.Members)
+            {
+                if (!_sessions.TryGet(member.ConnectionId, out var memberSession) || memberSession is null)
+                    continue;
+
+                if (memberSession.EnabledCapabilities.Contains("extended-join"))
+                {
+                    if (state.TryGetUser(session.ConnectionId, out var joiningUser) && joiningUser is not null)
+                    {
+                        var accountName = "*"; // No account system yet
+                        var realName = joiningUser.RealName ?? "Unknown";
+                        var extJoinLine = $":{nick}!{userName}@{host2} JOIN {channelName} {accountName} :{realName}";
+                        await memberSession.SendAsync(extJoinLine, ct);
+                    }
+                    else
+                    {
+                        var extJoinLine = $":{nick}!{userName}@{host2} JOIN {channelName} * :Unknown";
+                        await memberSession.SendAsync(extJoinLine, ct);
+                    }
+                }
+                else
+                {
+                    var joinLine = $":{nick}!{userName}@{host2} JOIN :{channelName}";
+                    await memberSession.SendAsync(joinLine, ct);
+                }
+            }
 
             var privilegeAfterServices = channel.GetPrivilege(session.ConnectionId);
             var privilegeChangedByServices = false;
@@ -202,23 +265,57 @@
             else
             {
                 await session.SendAsync($":server 332 {nick} {channelName} :{channel.Topic}", ct);
+
+                if (!string.IsNullOrWhiteSpace(channel.TopicSetBy) && channel.TopicSetAtUtc.HasValue)
+                {
+                    await session.SendAsync($":server 333 {nick} {channelName} {channel.TopicSetBy} {channel.TopicTs}", ct);
+                }
             }
 
-            await SendNamesAsync(session, channel, ct);
+            await session.SendAsync($":server 329 {nick} {channelName} {channel.CreatedTs}", ct);
+
+            await SendNamesAsync(session, channel, state, ct);
         }
 
-        private static async ValueTask SendNamesAsync(IClientSession session, Channel channel, CancellationToken ct)
+        private static async ValueTask SendNamesAsync(IClientSession session, Channel channel, ServerState state, CancellationToken ct)
         {
             var me = session.Nick!;
             var channelName = channel.Name;
+
+            var useMultiPrefix = session.EnabledCapabilities.Contains("multi-prefix");
+            var useUserhostInNames = session.EnabledCapabilities.Contains("userhost-in-names");
 
             var names = channel.Members
                 .OrderByDescending(m => m.Privilege)
                 .ThenBy(m => m.Nick, StringComparer.OrdinalIgnoreCase)
                 .Select(m =>
                 {
-                    var p = m.Privilege.ToPrefix();
-                    return p is null ? m.Nick : $"{p}{m.Nick}";
+                    string prefix;
+                    if (useMultiPrefix)
+                    {
+                        prefix = m.Privilege.ToAllPrefixes();
+                    }
+                    else
+                    {
+                        var p = m.Privilege.ToPrefix();
+                        prefix = p.HasValue ? p.Value.ToString() : string.Empty;
+                    }
+                    
+                    if (useUserhostInNames)
+                    {
+                        var userName = "user";
+                        var host = "host";
+                        
+                        if (state.TryGetUser(m.ConnectionId, out var memberUser) && memberUser is not null)
+                        {
+                            userName = memberUser.UserName ?? "user";
+                            host = state.GetHostFor(m.ConnectionId);
+                        }
+                        
+                        return $"{prefix}{m.Nick}!{userName}@{host}";
+                    }
+                    
+                    return prefix + m.Nick;
                 })
                 .Where(s => !string.IsNullOrWhiteSpace(s))
                 .ToList();

@@ -85,6 +85,12 @@ namespace IRCd.Core.Commands.Handlers
                 return;
             }
 
+            if (targetUser.IsService)
+            {
+                await session.SendAsync($":{server} NOTICE {me} :Cannot SVSNICK services", ct);
+                return;
+            }
+
             if (string.Equals(targetNick, newNick, StringComparison.OrdinalIgnoreCase))
             {
                 await session.SendAsync($":{server} NOTICE {me} :SVSNICK no-op", ct);

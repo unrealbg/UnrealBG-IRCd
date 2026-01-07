@@ -73,6 +73,12 @@
                 return;
             }
 
+            if (state.TryGetUser(targetConn, out var targetUser) && targetUser is not null && targetUser.IsService)
+            {
+                await session.SendAsync($":server NOTICE {session.Nick} :Cannot INVITE services", ct);
+                return;
+            }
+
             ch.AddInvite(targetNick);
 
             await session.SendAsync($":server 341 {session.Nick} {targetNick} {channelName}", ct);

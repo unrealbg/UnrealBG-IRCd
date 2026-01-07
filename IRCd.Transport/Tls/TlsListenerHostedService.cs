@@ -33,7 +33,7 @@ namespace IRCd.Transport.Tls
         private readonly ConnectionGuardService _guard;
         private readonly RoutingService _routing;
         private readonly RateLimitService _rateLimit;
-        private readonly RuntimeDLineService _dlines;
+        private readonly BanService _bans;
         private readonly IHostEnvironment _env;
         private readonly ServerLinkService _links;
 
@@ -61,7 +61,7 @@ namespace IRCd.Transport.Tls
             RoutingService routing,
             HostmaskService hostmask,
             RateLimitService rateLimit,
-            RuntimeDLineService dlines,
+            BanService bans,
             IHostEnvironment env,
             ServerLinkService links,
             IMetrics metrics,
@@ -76,7 +76,7 @@ namespace IRCd.Transport.Tls
             _routing = routing;
             _hostmask = hostmask;
             _rateLimit = rateLimit;
-            _dlines = dlines;
+            _bans = bans;
             _env = env;
             _links = links;
             _metrics = metrics;
@@ -298,7 +298,8 @@ namespace IRCd.Transport.Tls
         {
             var remoteIp = GetRemoteIp(client);
 
-            if (_dlines.TryMatch(remoteIp.ToString(), out var dlineReason))
+            var ipBan = await _bans.TryMatchIpAsync(remoteIp, ct);
+            if (ipBan is not null)
             {
                 try
                 {
@@ -309,7 +310,8 @@ namespace IRCd.Transport.Tls
                         AutoFlush = true
                     };
 
-                    await writer.WriteLineAsync($"ERROR :D-Lined ({dlineReason})");
+                    var banText = ipBan.Type == BanType.ZLINE ? "Z-Lined" : "D-Lined";
+                    await writer.WriteLineAsync($"ERROR :{banText} ({ipBan.Reason})");
                 }
                 catch { }
 

@@ -17,12 +17,12 @@ namespace IRCd.Core.Commands.Handlers
         public string Command => "UNKLINE";
 
         private readonly IOptions<IrcOptions> _options;
-        private readonly RuntimeKLineService _klines;
+        private readonly BanService _banService;
 
-        public UnklineHandler(IOptions<IrcOptions> options, RuntimeKLineService klines)
+        public UnklineHandler(IOptions<IrcOptions> options, BanService banService)
         {
             _options = options;
-            _klines = klines;
+            _banService = banService;
         }
 
         public async ValueTask HandleAsync(IClientSession session, Protocol.IrcMessage msg, ServerState state, CancellationToken ct)
@@ -49,7 +49,7 @@ namespace IRCd.Core.Commands.Handlers
             }
 
             var mask = (msg.Params[0] ?? string.Empty).Trim();
-            var removed = _klines.Remove(mask);
+            var removed = await _banService.RemoveAsync(BanType.KLINE, mask, ct);
 
             await session.SendAsync($":{serverName} NOTICE {me} :UNKLINE {(removed ? "removed" : "not found")} {mask}", ct);
         }

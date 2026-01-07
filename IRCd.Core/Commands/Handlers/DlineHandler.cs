@@ -18,14 +18,14 @@ namespace IRCd.Core.Commands.Handlers
         public string Command => "DLINE";
 
         private readonly IOptions<IrcOptions> _options;
-        private readonly RuntimeDLineService _dlines;
-        private readonly ISessionRegistry _sessions;
+        private readonly BanService _banService;
+        private readonly IBanEnforcer _enforcement;
 
-        public DlineHandler(IOptions<IrcOptions> options, RuntimeDLineService dlines, ISessionRegistry sessions)
+        public DlineHandler(IOptions<IrcOptions> options, BanService banService, IBanEnforcer enforcement)
         {
             _options = options;
-            _dlines = dlines;
-            _sessions = sessions;
+            _banService = banService;
+            _enforcement = enforcement;
         }
 
         public async ValueTask HandleAsync(IClientSession session, Protocol.IrcMessage msg, ServerState state, CancellationToken ct)
@@ -56,44 +56,67 @@ namespace IRCd.Core.Commands.Handlers
             if (rawMask.StartsWith("-", StringComparison.Ordinal))
             {
                 var toRemove = rawMask.TrimStart('-').Trim();
-                var removed = _dlines.Remove(toRemove);
+                var removed = await _banService.RemoveAsync(BanType.DLINE, toRemove, ct);
                 await session.SendAsync($":{serverName} NOTICE {me} :UNDLINE {(removed ? "removed" : "not found")} {toRemove}", ct);
                 return;
             }
 
             var mask = rawMask.Trim();
-            var reason = msg.Trailing;
-            if (string.IsNullOrWhiteSpace(reason) && msg.Params.Count >= 2)
+            
+            DateTimeOffset? expiresAt = null;
+            if (msg.Params.Count >= 2 && !string.IsNullOrWhiteSpace(msg.Params[1]))
             {
-                reason = msg.Params[1];
-            }
-
-            if (string.IsNullOrWhiteSpace(reason))
-                reason = "Banned";
-
-            _dlines.AddOrReplace(mask, reason);
-
-            foreach (var u in state.GetAllUsers().Where(u => u.IsRegistered && !u.IsRemote).ToArray())
-            {
-                var remoteIp = u.RemoteIp;
-                if (string.IsNullOrWhiteSpace(remoteIp))
-                    continue;
-
-                if (_dlines.TryMatch(remoteIp, out var r))
+                var possibleDuration = msg.Params[1];
+                if (char.IsDigit(possibleDuration[0]) || possibleDuration.Equals("perm", StringComparison.OrdinalIgnoreCase))
                 {
-                    var nick = u.Nick ?? "*";
-
-                    if (_sessions.TryGet(u.ConnectionId, out var targetSession) && targetSession is not null)
+                    expiresAt = BanEntry.ParseDuration(possibleDuration);
+                    var reason = msg.Trailing;
+                    if (string.IsNullOrWhiteSpace(reason) && msg.Params.Count >= 3)
                     {
-                        await targetSession.SendAsync($":{serverName} 465 {nick} :You are banned from this server ({r})", ct);
-                        await targetSession.CloseAsync("D-Lined", ct);
+                        reason = msg.Params[2];
                     }
+                    if (string.IsNullOrWhiteSpace(reason))
+                        reason = "Banned";
 
-                    state.RemoveUser(u.ConnectionId);
+                    var ban = new BanEntry
+                    {
+                        Type = BanType.DLINE,
+                        Mask = mask,
+                        Reason = reason,
+                        SetBy = me,
+                        ExpiresAt = expiresAt
+                    };
+
+                    await _banService.AddAsync(ban, ct);
+                    await _enforcement.EnforceBanImmediatelyAsync(ban, ct);
+
+                    var expireText = expiresAt.HasValue ? $"expires {expiresAt.Value:yyyy-MM-dd HH:mm:ss} UTC" : "permanent";
+                    await session.SendAsync($":{serverName} NOTICE {me} :DLINE added {mask} ({expireText}) :{reason}", ct);
+                    return;
                 }
             }
 
-            await session.SendAsync($":{serverName} NOTICE {me} :DLINE added {mask} :{reason}", ct);
+            var banReason = msg.Trailing;
+            if (string.IsNullOrWhiteSpace(banReason) && msg.Params.Count >= 2)
+            {
+                banReason = msg.Params[1];
+            }
+            if (string.IsNullOrWhiteSpace(banReason))
+                banReason = "Banned";
+
+            var permanentBan = new BanEntry
+            {
+                Type = BanType.DLINE,
+                Mask = mask,
+                Reason = banReason,
+                SetBy = me,
+                ExpiresAt = null
+            };
+
+            await _banService.AddAsync(permanentBan, ct);
+            await _enforcement.EnforceBanImmediatelyAsync(permanentBan, ct);
+
+            await session.SendAsync($":{serverName} NOTICE {me} :DLINE added {mask} (permanent) :{banReason}", ct);
         }
     }
 }

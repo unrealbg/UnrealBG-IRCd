@@ -11,6 +11,8 @@
     using IRCd.Core.Protocol;
     using IRCd.Core.Services;
     using IRCd.Core.State;
+    using IRCd.Shared.Options;
+    using Microsoft.Extensions.Options;
 
     public sealed class ModeHandler : IIrcCommandHandler
     {
@@ -18,12 +20,16 @@
 
         private readonly RoutingService _routing;
         private readonly ServerLinkService _links;
+        private readonly HostmaskService _hostmask;
         private readonly IServiceChannelEvents? _channelEvents;
+        private readonly IOptions<IrcOptions> _options;
 
-        public ModeHandler(RoutingService routing, ServerLinkService links, IServiceChannelEvents? channelEvents = null)
+        public ModeHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask, IOptions<IrcOptions> options, IServiceChannelEvents? channelEvents = null)
         {
             _routing = routing;
             _links = links;
+            _hostmask = hostmask;
+            _options = options;
             _channelEvents = channelEvents;
         }
 
@@ -80,10 +86,28 @@
                 return;
             }
 
+            var providedArgs = msg.Params.Count - 2;
+            var requiredUserArgs = modeToken.Count(ch => ch is 'q' or 'a' or 'o' or 'h' or 'v');
+            var allowImplicitSelfTarget = providedArgs == 0 && requiredUserArgs == 1;
+
             var argIndex = 2;
 
             var appliedModes = new List<char>();
             var appliedArgs = new List<string>();
+
+            char? lastAppliedSign = null;
+            string? deferredError = null;
+
+            void RecordAppliedMode(char signChar, char modeChar)
+            {
+                if (lastAppliedSign != signChar)
+                {
+                    appliedModes.Add(signChar);
+                    lastAppliedSign = signChar;
+                }
+
+                appliedModes.Add(modeChar);
+            }
 
             char sign = modeToken[0];
 
@@ -99,7 +123,21 @@
 
                 if (changed)
                 {
-                    appliedModes.AddRange(modeToken.Where(c => c is 'n' or 't' || c is '+' or '-'));
+                    var tmpSign = modeToken[0];
+                    for (int j = 1; j < modeToken.Length; j++)
+                    {
+                        var mc = modeToken[j];
+                        if (mc == '+' || mc == '-')
+                        {
+                            tmpSign = mc;
+                            continue;
+                        }
+
+                        if (mc is 'n' or 't')
+                        {
+                            RecordAppliedMode(tmpSign, mc);
+                        }
+                    }
                 }
             }
 
@@ -120,7 +158,7 @@
                     continue;
                 }
 
-                if (c is not ('q' or 'a' or 'o' or 'h' or 'v' or 'b' or 'i' or 'k' or 'l' or 'm' or 'p' or 's'))
+                if (c is not ('q' or 'a' or 'o' or 'h' or 'v' or 'b' or 'e' or 'I' or 'i' or 'k' or 'l' or 'm' or 'p' or 's'))
                 {
                     continue;
                 }
@@ -129,20 +167,20 @@
                 {
                     if (!state.TryGetChannel(target, out var ch) || ch is null)
                     {
-                        await session.SendAsync($":server 403 {session.Nick} {target} :No such channel", ct);
-                        return;
+                        deferredError = $":server 403 {session.Nick} {target} :No such channel";
+                        break;
                     }
 
                     if (!ch.Contains(session.ConnectionId))
                     {
-                        await session.SendAsync($":server 442 {session.Nick} {target} :You're not on that channel", ct);
-                        return;
+                        deferredError = $":server 442 {session.Nick} {target} :You're not on that channel";
+                        break;
                     }
 
                     if (!ch.HasPrivilege(session.ConnectionId, ChannelPrivilege.Op))
                     {
-                        await session.SendAsync($":server 482 {session.Nick} {target} :You're not channel operator", ct);
-                        return;
+                        deferredError = $":server 482 {session.Nick} {target} :You're not channel operator";
+                        break;
                     }
 
                     var setOn = currentSign == '+';
@@ -152,8 +190,7 @@
                         var changed = ch.ApplyModeChange(ChannelModes.InviteOnly, setOn);
                         if (!changed) continue;
 
-                        if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
-                        appliedModes.Add('i');
+                        RecordAppliedMode(currentSign, 'i');
                         continue;
                     }
 
@@ -163,23 +200,21 @@
                         {
                             if (msg.Params.Count <= argIndex)
                             {
-                                await session.SendAsync($":server 461 {session.Nick} MODE :Not enough parameters", ct);
-                                return;
+                                deferredError = $":server 461 {session.Nick} MODE :Not enough parameters";
+                                break;
                             }
 
                             var keyArg = msg.Params[argIndex++];
                             ch.SetKey(keyArg);
 
-                            if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
-                            appliedModes.Add('k');
+                            RecordAppliedMode(currentSign, 'k');
                             appliedArgs.Add(keyArg);
                         }
                         else
                         {
                             ch.SetKey(null);
 
-                            if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
-                            appliedModes.Add('k');
+                            RecordAppliedMode(currentSign, 'k');
                         }
 
                         continue;
@@ -191,33 +226,27 @@
                         {
                             if (msg.Params.Count <= argIndex)
                             {
-                                await session.SendAsync($":server 461 {session.Nick} MODE :Not enough parameters", ct);
-                                return;
+                                deferredError = $":server 461 {session.Nick} MODE :Not enough parameters";
+                                break;
                             }
 
                             var raw = msg.Params[argIndex++];
                             if (!int.TryParse(raw, out var limitArg) || limitArg <= 0)
                             {
-                                await session.SendAsync($":server 461 {session.Nick} MODE :Invalid limit", ct);
-                                return;
+                                deferredError = $":server 461 {session.Nick} MODE :Invalid limit";
+                                break;
                             }
 
                             ch.SetLimit(limitArg);
 
-                            if (!appliedModes.Contains(currentSign))
-                                appliedModes.Insert(0, currentSign);
-
-                            appliedModes.Add('l');
+                            RecordAppliedMode(currentSign, 'l');
                             appliedArgs.Add(raw);
                         }
                         else
                         {
                             ch.SetLimit(null);
 
-                            if (!appliedModes.Contains(currentSign))
-                                appliedModes.Insert(0, currentSign);
-
-                            appliedModes.Add('l');
+                            RecordAppliedMode(currentSign, 'l');
                         }
 
                         continue;
@@ -228,8 +257,7 @@
                         var changed = ch.ApplyModeChange(ChannelModes.Moderated, setOn);
                         if (!changed) continue;
 
-                        if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
-                        appliedModes.Add('m');
+                        RecordAppliedMode(currentSign, 'm');
                         continue;
                     }
 
@@ -238,8 +266,7 @@
                         var changed = ch.ApplyModeChange(ChannelModes.Private, setOn);
                         if (!changed) continue;
 
-                        if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
-                        appliedModes.Add('p');
+                        RecordAppliedMode(currentSign, 'p');
                         continue;
                     }
 
@@ -248,8 +275,7 @@
                         var changed = ch.ApplyModeChange(ChannelModes.Secret, setOn);
                         if (!changed) continue;
 
-                        if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
-                        appliedModes.Add('s');
+                        RecordAppliedMode(currentSign, 's');
                         continue;
                     }
                 }
@@ -292,6 +318,15 @@
                     var mask = msg.Params[argIndex++];
                     var setter = session.Nick ?? "*";
 
+                    if (banEnable)
+                    {
+                        var maxList = _options.Value.Limits?.MaxListModes > 0 ? _options.Value.Limits.MaxListModes : 60;
+                        if (ch.Bans.Count >= maxList)
+                        {                            await session.SendAsync($":server 478 {session.Nick} {target} {mask} :Channel ban list is full", ct);
+                            continue;
+                        }
+                    }
+
                     var changedBan = banEnable ? ch.AddBan(mask, setter) : ch.RemoveBan(mask);
                     if (!changedBan) continue;
 
@@ -301,39 +336,180 @@
                     continue;
                 }
 
-                if (msg.Params.Count <= argIndex)
+                if (c == 'e')
                 {
-                    await session.SendAsync($":server 461 {session.Nick} MODE :Not enough parameters", ct);
-                    return;
+                    if (!state.TryGetChannel(target, out var ch) || ch is null)
+                    {
+                        await session.SendAsync($":server 403 {session.Nick} {target} :No such channel", ct);
+                        return;
+                    }
+
+                    if (!ch.Contains(session.ConnectionId))
+                    {
+                        await session.SendAsync($":server 442 {session.Nick} {target} :You're not on that channel", ct);
+                        return;
+                    }
+
+                    if (!ch.HasPrivilege(session.ConnectionId, ChannelPrivilege.Op))
+                    {
+                        await session.SendAsync($":server 482 {session.Nick} {target} :You're not channel operator", ct);
+                        return;
+                    }
+
+                    var exceptEnable = currentSign == '+';
+
+                    if (msg.Params.Count <= argIndex)
+                    {
+                        foreach (var except in ch.ExceptBans)
+                        {
+                            await session.SendAsync(
+                                $":server 348 {session.Nick} {target} {except.Mask} {except.SetBy} {except.SetAtUtc.ToUnixTimeSeconds()}",
+                                ct);
+                        }
+
+                        await session.SendAsync($":server 349 {session.Nick} {target} :End of Channel Exception List", ct);
+                        continue;
+                    }
+
+                    var mask = msg.Params[argIndex++];
+                    var setter = session.Nick ?? "*";
+
+                    if (exceptEnable)
+                    {
+                        var maxList = _options.Value.Limits?.MaxListModes > 0 ? _options.Value.Limits.MaxListModes : 60;
+                        if (ch.ExceptBans.Count >= maxList)
+                        {
+                            await session.SendAsync($":server 478 {session.Nick} {target} {mask} :Channel exception list is full", ct);
+                            continue;
+                        }
+                    }
+
+                    var changedExcept = exceptEnable ? ch.AddExceptBan(mask, setter) : ch.RemoveExceptBan(mask);
+                    if (!changedExcept) continue;
+
+                    if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
+                    appliedModes.Add('e');
+                    appliedArgs.Add(mask);
+                    continue;
                 }
 
-                var nickArg = msg.Params[argIndex++];
+                if (c == 'I')
+                {
+                    if (!state.TryGetChannel(target, out var ch) || ch is null)
+                    {
+                        await session.SendAsync($":server 403 {session.Nick} {target} :No such channel", ct);
+                        return;
+                    }
+
+                    if (!ch.Contains(session.ConnectionId))
+                    {
+                        await session.SendAsync($":server 442 {session.Nick} {target} :You're not on that channel", ct);
+                        return;
+                    }
+
+                    if (!ch.HasPrivilege(session.ConnectionId, ChannelPrivilege.Op))
+                    {
+                        await session.SendAsync($":server 482 {session.Nick} {target} :You're not channel operator", ct);
+                        return;
+                    }
+
+                    var inviteExceptEnable = currentSign == '+';
+
+                    if (msg.Params.Count <= argIndex)
+                    {
+                        foreach (var inviteExcept in ch.InviteExceptions)
+                        {
+                            await session.SendAsync(
+                                $":server 346 {session.Nick} {target} {inviteExcept.Mask} {inviteExcept.SetBy} {inviteExcept.SetAtUtc.ToUnixTimeSeconds()}",
+                                ct);
+                        }
+
+                        await session.SendAsync($":server 347 {session.Nick} {target} :End of Channel Invite Exception List", ct);
+                        continue;
+                    }
+
+                    var mask = msg.Params[argIndex++];
+                    var setter = session.Nick ?? "*";
+
+                    if (inviteExceptEnable)
+                    {
+                        var maxList = _options.Value.Limits?.MaxListModes > 0 ? _options.Value.Limits.MaxListModes : 60;
+                        if (ch.InviteExceptions.Count >= maxList)
+                        {
+                            await session.SendAsync($":server 478 {session.Nick} {target} {mask} :Channel invite exception list is full", ct);
+                            continue;
+                        }
+                    }
+
+                    var changedInviteExcept = inviteExceptEnable ? ch.AddInviteException(mask, setter) : ch.RemoveInviteException(mask);
+                    if (!changedInviteExcept) continue;
+
+                    if (!appliedModes.Contains(currentSign)) appliedModes.Insert(0, currentSign);
+                    appliedModes.Add('I');
+                    appliedArgs.Add(mask);
+                    continue;
+                }
+
+                string nickArg;
+                if (msg.Params.Count <= argIndex)
+                {
+                    if (!allowImplicitSelfTarget)
+                    {
+                        deferredError = $":server 461 {session.Nick} MODE :Not enough parameters";
+                        break;
+                    }
+
+                    nickArg = session.Nick ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(nickArg))
+                    {
+                        deferredError = $":server 461 {session.Nick} MODE :Not enough parameters";
+                        break;
+                    }
+                }
+                else
+                {
+                    nickArg = msg.Params[argIndex++];
+                }
                 var userModeEnable = currentSign == '+';
+
+                if (!userModeEnable && (c == 'o' || c == 'v'))
+                {
+                    if (state.TryGetConnectionIdByNick(nickArg, out var targetConnId) && targetConnId is not null
+                        && state.TryGetUser(targetConnId, out var targetUser) && targetUser is not null
+                        && targetUser.IsService)
+                    {
+                        continue;
+                    }
+                }
 
                 var ok = state.TrySetChannelPrivilege(target, session.ConnectionId, c, userModeEnable, nickArg, out var updatedChannel, out var error2);
                 if (!ok || updatedChannel is null)
                 {
                     if (error2 == "No such nick")
                     {
-                        await session.SendAsync($":server 401 {session.Nick} {nickArg} :No such nick", ct);
-                    }
-                    else if (error2 == "They aren't on that channel")
-                    {
-                        await session.SendAsync($":server 441 {session.Nick} {nickArg} {target} :They aren't on that channel", ct);
-                    }
-                    else
-                    {
-                        await SendModeError(session, target, error2, ct);
+                        deferredError = $":server 401 {session.Nick} {nickArg} :No such nick";
+                        break;
                     }
 
-                    return;
+                    if (error2 == "They aren't on that channel")
+                    {
+                        deferredError = $":server 441 {session.Nick} {nickArg} {target} :They aren't on that channel";
+                        break;
+                    }
+
+                    deferredError = null;
+                    await SendModeError(session, target, error2, ct);
+                    break;
                 }
 
-                if (!appliedModes.Contains(currentSign))
-                    appliedModes.Insert(0, currentSign);
-
-                appliedModes.Add(c);
+                RecordAppliedMode(currentSign, c);
                 appliedArgs.Add(nickArg);
+            }
+
+            if (deferredError is not null && appliedModes.Count == 0 && appliedArgs.Count == 0)
+            {
+                await session.SendAsync(deferredError, ct);
+                return;
             }
 
             if (appliedModes.Count == 0 && appliedArgs.Count == 0)
@@ -345,11 +521,20 @@
             var nick = session.Nick!;
             var userName2 = session.UserName ?? "u";
 
-            var modeOut = BuildModeOut(modeToken[0], appliedModes);
+            var modeOut = BuildModeOut(appliedModes);
             var argsOut = appliedArgs.Count > 0 ? " " + string.Join(' ', appliedArgs) : string.Empty;
 
-            var line = $":{nick}!{userName2}@localhost MODE {target} {modeOut}{argsOut}";
+            var host = state.GetHostFor(session.ConnectionId);
+            var line = $":{nick}!{userName2}@{host} MODE {target} {modeOut}{argsOut}";
             await _routing.BroadcastToChannelAsync(finalChannel, line, excludeConnectionId: null, ct);
+
+            if (deferredError is not null)
+            {
+                if (!deferredError.Contains(" 461 ", StringComparison.Ordinal))
+                {
+                    await session.SendAsync(deferredError, ct);
+                }
+            }
 
             if (_channelEvents is not null)
             {
@@ -527,11 +712,7 @@
             return list;
         }
 
-        private static string BuildModeOut(char defaultSign, List<char> appliedModes)
-        {
-            var letters = appliedModes.Where(c => c is not ('+' or '-')).ToArray();
-            return defaultSign + new string(letters);
-        }
+        private static string BuildModeOut(List<char> appliedModes) => new string(appliedModes.ToArray());
 
         private static async ValueTask SendModeError(IClientSession session, string channel, string? error, CancellationToken ct)
         {

@@ -14,6 +14,8 @@ public sealed class CommandLimitsOptions
 
     public int MaxListTargets { get; set; } = 20;
 
+    public int MaxListModes { get; set; } = 60;
+
     public int MaxPrivmsgTargets { get; set; } = 4;
 
     public int MaxNoticeTargets { get; set; } = 4;

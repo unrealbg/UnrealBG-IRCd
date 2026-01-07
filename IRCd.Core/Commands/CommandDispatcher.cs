@@ -16,13 +16,15 @@
     {
         private readonly Dictionary<string, IIrcCommandHandler> _handlers;
         private readonly RateLimitService _rateLimit;
+        private readonly FloodService? _flood;
         private readonly IMetrics _metrics;
 
-        public CommandDispatcher(IEnumerable<IIrcCommandHandler> handlers, RateLimitService rateLimit, IMetrics metrics)
+        public CommandDispatcher(IEnumerable<IIrcCommandHandler> handlers, RateLimitService rateLimit, IMetrics metrics, FloodService? flood = null)
         {
             _handlers = handlers.ToDictionary(h => h.Command, StringComparer.OrdinalIgnoreCase);
             _rateLimit = rateLimit;
             _metrics = metrics;
+            _flood = flood;
         }
 
         public async ValueTask DispatchAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -59,12 +61,68 @@
                     }
                 }
 
+                if (_flood is not null)
+                {
+                    var floodResult = CheckFlood(session, msg, state);
+                    if (floodResult.IsFlooding)
+                    {
+                        var nick = session.Nick ?? "*";
+                        await session.SendAsync($":server NOTICE {nick} :Flood detected. Try again in {floodResult.CooldownSeconds}s", ct);
+                        return;
+                    }
+                }
+
                 await handler.HandleAsync(session, msg, state, ct);
             }
             else
             {
                 await session.SendAsync($":server 421 {session.Nick ?? "*"} {msg.Command} :Unknown command", ct);
             }
+        }
+
+        private FloodCheckResult CheckFlood(IClientSession session, IrcMessage msg, ServerState state)
+        {
+            state.TryGetUser(session.ConnectionId, out var user);
+
+            if (msg.Command.Equals("PRIVMSG", StringComparison.OrdinalIgnoreCase)
+                || msg.Command.Equals("NOTICE", StringComparison.OrdinalIgnoreCase))
+            {
+                var rawTargets = msg.Params is not null && msg.Params.Count > 0 ? msg.Params[0] : null;
+                if (string.IsNullOrWhiteSpace(rawTargets))
+                {
+                    return default;
+                }
+
+                FloodCheckResult worst = default;
+                foreach (var target in rawTargets.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    var r = _flood!.CheckMessageFlood(session.ConnectionId, target, user);
+                    if (r.IsFlooding)
+                    {
+                        return r;
+                    }
+
+                    if (r.ShouldWarn)
+                    {
+                        worst = r;
+                    }
+                }
+
+                return worst;
+            }
+
+            if (msg.Command.Equals("JOIN", StringComparison.OrdinalIgnoreCase)
+                || msg.Command.Equals("PART", StringComparison.OrdinalIgnoreCase))
+            {
+                return _flood!.CheckJoinPartFlood(session.ConnectionId, user);
+            }
+
+            if (msg.Command.Equals("NICK", StringComparison.OrdinalIgnoreCase))
+            {
+                return _flood!.CheckNickFlood(session.ConnectionId, user);
+            }
+
+            return default;
         }
 
         private static bool IsRateLimitedCommand(string command)

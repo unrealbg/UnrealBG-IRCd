@@ -77,6 +77,12 @@
                 return;
             }
 
+            if (state.TryGetUser(targetConn, out var targetUser) && targetUser is not null && targetUser.IsService)
+            {
+                await session.SendAsync($":server NOTICE {meNick} :Cannot KICK services", ct);
+                return;
+            }
+
             if (!channel.Contains(targetConn))
             {
                 await session.SendAsync($":server 441 {meNick} {targetNick} {channelName} :They aren't on that channel", ct);

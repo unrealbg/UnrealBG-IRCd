@@ -1048,6 +1048,24 @@ namespace IRCd.Core.Config
                         continue;
                     }
 
+                    if (TryConsumeIdent("memoserv"))
+                    {
+                        ConsumePunct("{");
+                        ParseMemoServBlock();
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("seenserv"))
+                    {
+                        ConsumePunct("{");
+                        ParseSeenServBlock();
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
                     ConsumeUnknownStatement();
                 }
             }
@@ -1096,6 +1114,15 @@ namespace IRCd.Core.Config
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var h))
                             _o.Services.NickServ.PendingRegistrationExpiryHours = h;
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("expire_days"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var d))
+                            _o.Services.NickServ.AccountExpiryDays = d;
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1170,6 +1197,47 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         _o.Services.ChanServ.ChannelsFilePath = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("autojoin") || TryConsumeIdent("autojoin_registered"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        _o.Services.ChanServ.AutoJoinRegisteredChannels = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+            }
+
+            private void ParseMemoServBlock()
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("memos"))
+                    {
+                        ConsumePunct("=");
+                        _o.Services.MemoServ.MemosFilePath = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+            }
+
+            private void ParseSeenServBlock()
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("seen"))
+                    {
+                        ConsumePunct("=");
+                        _o.Services.SeenServ.SeenFilePath = ParseValue();
                         ConsumeOptionalPunct(";");
                         continue;
                     }

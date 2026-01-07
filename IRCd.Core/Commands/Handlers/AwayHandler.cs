@@ -1,6 +1,7 @@
 namespace IRCd.Core.Commands.Handlers
 {
     using System;
+    using System.Linq;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -12,6 +13,13 @@ namespace IRCd.Core.Commands.Handlers
     public sealed class AwayHandler : IIrcCommandHandler
     {
         public string Command => "AWAY";
+
+        private readonly ISessionRegistry _sessions;
+
+        public AwayHandler(ISessionRegistry sessions)
+        {
+            _sessions = sessions;
+        }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
         {
@@ -39,6 +47,8 @@ namespace IRCd.Core.Commands.Handlers
             {
                 u.AwayMessage = null;
                 await session.SendAsync($":server 305 {session.Nick} :You are no longer marked as being away", ct);
+                
+                await BroadcastAwayNotifyAsync(session, state, null, ct);
                 return;
             }
 
@@ -47,6 +57,50 @@ namespace IRCd.Core.Commands.Handlers
 
             u.AwayMessage = away;
             await session.SendAsync($":server 306 {session.Nick} :You have been marked as being away", ct);
+            
+            await BroadcastAwayNotifyAsync(session, state, away, ct);
+        }
+
+        private async ValueTask BroadcastAwayNotifyAsync(IClientSession session, ServerState state, string? awayMessage, CancellationToken ct)
+        {
+            var userChannels = state.GetUserChannels(session.ConnectionId);
+            var notifiedConnIds = new System.Collections.Generic.HashSet<string>();
+
+            foreach (var channelName in userChannels)
+            {
+                if (!state.TryGetChannel(channelName, out var channel) || channel is null)
+                    continue;
+
+                foreach (var member in channel.Members)
+                {
+                    if (member.ConnectionId == session.ConnectionId)
+                        continue;
+
+                    if (notifiedConnIds.Contains(member.ConnectionId))
+                        continue;
+
+                    if (!_sessions.TryGet(member.ConnectionId, out var memberSession) || memberSession is null)
+                        continue;
+
+                    if (!memberSession.EnabledCapabilities.Contains("away-notify"))
+                        continue;
+
+                    notifiedConnIds.Add(member.ConnectionId);
+
+                    var nick = session.Nick ?? "*";
+                    var userName = session.UserName ?? "u";
+                    var host = state.GetHostFor(session.ConnectionId);
+                    
+                    if (string.IsNullOrWhiteSpace(awayMessage))
+                    {
+                        await memberSession.SendAsync($":{nick}!{userName}@{host} AWAY", ct);
+                    }
+                    else
+                    {
+                        await memberSession.SendAsync($":{nick}!{userName}@{host} AWAY :{awayMessage}", ct);
+                    }
+                }
+            }
         }
     }
 }

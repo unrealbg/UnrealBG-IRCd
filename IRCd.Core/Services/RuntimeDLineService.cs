@@ -66,6 +66,14 @@ namespace IRCd.Core.Services
             }
         }
 
+        public void Clear()
+        {
+            lock (_lock)
+            {
+                _options.Value.DLines = Array.Empty<DLineOptions>();
+            }
+        }
+
         public bool TryMatch(string remoteIp, out string reason)
         {
             reason = "Banned";

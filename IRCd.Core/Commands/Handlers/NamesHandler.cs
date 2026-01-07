@@ -69,18 +69,90 @@
                 return;
             }
 
-            var nicks = channel.Members
-                               .OrderByDescending(m => m.Privilege)
-                               .ThenBy(m => m.Nick, StringComparer.OrdinalIgnoreCase)
-                               .Select(m =>
+            if (channel.Modes.HasFlag(ChannelModes.Secret) && !channel.Contains(session.ConnectionId))
             {
-                var p = m.Privilege.ToPrefix();
-                return p is null ? m.Nick : $"{p}{m.Nick}";
-            });
+                await session.SendAsync($":server 366 {session.Nick} {channelName} :End of /NAMES list.", ct);
+                return;
+            }
 
-            var namesLine = string.Join(' ', nicks);
+            var names = channel.Members
+                .OrderByDescending(m => m.Privilege)
+                .ThenBy(m => m.Nick, StringComparer.OrdinalIgnoreCase)
+                .Select(m =>
+                {
+                    var useMultiPrefix = session.EnabledCapabilities.Contains("multi-prefix");
+                    var useUserhostInNames = session.EnabledCapabilities.Contains("userhost-in-names");
+                    
+                    string prefix;
+                    if (useMultiPrefix)
+                    {
+                        prefix = m.Privilege.ToAllPrefixes();
+                    }
+                    else
+                    {
+                        var p = m.Privilege.ToPrefix();
+                        prefix = p.HasValue ? p.Value.ToString() : string.Empty;
+                    }
+                    
+                    if (useUserhostInNames)
+                    {
+                        var userName = "user";
+                        var host = "host";
+                        
+                        if (state.TryGetUser(m.ConnectionId, out var memberUser) && memberUser is not null)
+                        {
+                            userName = memberUser.UserName ?? "user";
+                            host = state.GetHostFor(m.ConnectionId);
+                        }
+                        
+                        return $"{prefix}{m.Nick}!{userName}@{host}";
+                    }
+                    
+                    return prefix + m.Nick;
+                })
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToList();
 
-            await session.SendAsync($":server 353 {session.Nick} = {channelName} :{namesLine}", ct);
+            const int maxPayloadChars = 400;
+
+            if (names.Count == 0)
+            {
+                await session.SendAsync($":server 353 {session.Nick} = {channelName} :", ct);
+                await session.SendAsync($":server 366 {session.Nick} {channelName} :End of /NAMES list.", ct);
+                return;
+            }
+
+            var current = new System.Collections.Generic.List<string>();
+            var len = 0;
+
+            foreach (var n in names)
+            {
+                if (current.Count == 0)
+                {
+                    current.Add(n);
+                    len = n.Length;
+                    continue;
+                }
+
+                if (len + 1 + n.Length > maxPayloadChars)
+                {
+                    await session.SendAsync($":server 353 {session.Nick} = {channelName} :{string.Join(' ', current)}", ct);
+                    current.Clear();
+                    current.Add(n);
+                    len = n.Length;
+                }
+                else
+                {
+                    current.Add(n);
+                    len += 1 + n.Length;
+                }
+            }
+
+            if (current.Count > 0)
+            {
+                await session.SendAsync($":server 353 {session.Nick} = {channelName} :{string.Join(' ', current)}", ct);
+            }
+
             await session.SendAsync($":server 366 {session.Nick} {channelName} :End of /NAMES list.", ct);
         }
     }

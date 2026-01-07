@@ -2,8 +2,12 @@
   <Folder Name="/host/">
     <Project Path="IRCd.Server/IRCd.Server.csproj" Id="8cd265e8-3225-4d52-bf5b-d5af20769e3b" />
   </Folder>
+  <Folder Name="/Solution Items/">
+    <File Path=".editorconfig" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="IRCd.Core/IRCd.Core.csproj" />
+    <Project Path="IRCd.Services/IRCd.Services.csproj" Id="e8499872-a1c9-411a-bcba-2f1ccb3339f5" />
     <Project Path="IRCd.Shared/IRCd.Shared.csproj" Id="b599476c-f295-4e76-aede-5c6bcb697b7d" />
   </Folder>
   <Folder Name="/transport/">

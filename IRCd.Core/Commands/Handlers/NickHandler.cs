@@ -22,8 +22,9 @@
         private readonly IServiceSessionEvents? _serviceEvents;
         private readonly ISessionRegistry _sessions;
         private readonly Microsoft.Extensions.Logging.ILogger<NickHandler> _logger;
+        private readonly RuntimeDenyService? _deny;
 
-        public NickHandler(RoutingService routing, RegistrationService registration, ServerLinkService links, HostmaskService hostmask, WhowasService whowas, WatchService watch, Microsoft.Extensions.Options.IOptions<IRCd.Shared.Options.IrcOptions> options, ISessionRegistry sessions, Microsoft.Extensions.Logging.ILogger<NickHandler> logger, IServiceSessionEvents? serviceEvents = null)
+        public NickHandler(RoutingService routing, RegistrationService registration, ServerLinkService links, HostmaskService hostmask, WhowasService whowas, WatchService watch, Microsoft.Extensions.Options.IOptions<IRCd.Shared.Options.IrcOptions> options, ISessionRegistry sessions, Microsoft.Extensions.Logging.ILogger<NickHandler> logger, IServiceSessionEvents? serviceEvents = null, RuntimeDenyService? deny = null)
         {
             _routing = routing;
             _registration = registration;
@@ -35,6 +36,7 @@
             _sessions = sessions;
             _logger = logger;
             _serviceEvents = serviceEvents;
+            _deny = deny;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -52,6 +54,18 @@
             {
                 await session.SendAsync($":server 432 * {newNick} :Erroneous nickname", ct);
                 return;
+            }
+
+            if (_deny is not null)
+            {
+                var userNameForMask = session.UserName ?? "u";
+                var hostForMask = state.GetHostFor(session.ConnectionId);
+
+                if (_deny.TryMatch(newNick, userNameForMask, hostForMask, out var denyReason))
+                {
+                    await session.SendAsync($":server 437 * {newNick} :Nickname is denied ({denyReason})", ct);
+                    return;
+                }
             }
 
             var oldNick = session.Nick;
@@ -72,7 +86,7 @@
                         var ghostChannels = state.GetUserChannels(existingConnId);
                         var ghostNick = ghostUser.Nick ?? newNick;
                         var ghostUserName = ghostUser.UserName ?? "ghost";
-                        var ghostHost = _hostmask.GetDisplayedHost((existingSession?.RemoteEndPoint as System.Net.IPEndPoint)?.Address);
+                        var ghostHost = state.GetHostFor(existingConnId);
                         var quitLine = $":{ghostNick}!{ghostUserName}@{ghostHost} QUIT :Ghost session cleaned up";
 
                         var recipients = new HashSet<string>();
@@ -145,7 +159,7 @@
             var channels = state.UpdateNickInUserChannels(session.ConnectionId, newNick);
 
             var user = session.UserName ?? "u";
-            var host = (_hostmask.GetDisplayedHost((session.RemoteEndPoint as System.Net.IPEndPoint)?.Address));
+            var host = state.GetHostFor(session.ConnectionId);
             var nickLine = $":{oldNick}!{user}@{host} NICK :{newNick}";
 
             _logger.LogInformation("[NickHandler] Nick change {OldNick} -> {NewNick} for connId {ConnId}, in {ChannelCount} channels", 
@@ -176,7 +190,6 @@
             _logger.LogInformation("[NickHandler] Sending NICK change to self: {NickLine}", nickLine);
             await session.SendAsync(nickLine, ct);
 
-            // Force refresh channel member list for self by sending NAMES for each channel
             foreach (var ch in channels)
             {
                 var names = new System.Text.StringBuilder();

@@ -8,6 +8,8 @@
             new(StringComparer.OrdinalIgnoreCase);
 
         private readonly List<ChannelBan> _bans = new();
+        private readonly List<ChannelBan> _exceptBans = new();
+        private readonly List<ChannelBan> _inviteExceptions = new();
 
         public string? Key { get; private set; }
         public int? UserLimit { get; private set; }
@@ -128,6 +130,16 @@
             get { lock (_bans) return _bans.ToList(); }
         }
 
+        public IReadOnlyList<ChannelBan> ExceptBans
+        {
+            get { lock (_exceptBans) return _exceptBans.ToList(); }
+        }
+
+        public IReadOnlyList<ChannelBan> InviteExceptions
+        {
+            get { lock (_inviteExceptions) return _inviteExceptions.ToList(); }
+        }
+
         public bool AddBan(string mask, string setBy)
         {
             lock (_bans)
@@ -159,6 +171,76 @@
                 var idx = _bans.FindIndex(b => string.Equals(b.Mask, mask, StringComparison.OrdinalIgnoreCase));
                 if (idx < 0) return false;
                 _bans.RemoveAt(idx);
+                return true;
+            }
+        }
+
+        public bool AddExceptBan(string mask, string setBy)
+        {
+            lock (_exceptBans)
+            {
+                if (_exceptBans.Any(b => string.Equals(b.Mask, mask, StringComparison.OrdinalIgnoreCase)))
+                    return false;
+
+                _exceptBans.Add(new ChannelBan(mask, setBy, DateTimeOffset.UtcNow));
+                return true;
+            }
+        }
+
+        public bool AddExceptBan(string mask, string setBy, DateTimeOffset setAtUtc)
+        {
+            lock (_exceptBans)
+            {
+                if (_exceptBans.Any(b => string.Equals(b.Mask, mask, StringComparison.OrdinalIgnoreCase)))
+                    return false;
+
+                _exceptBans.Add(new ChannelBan(mask, setBy, setAtUtc));
+                return true;
+            }
+        }
+
+        public bool RemoveExceptBan(string mask)
+        {
+            lock (_exceptBans)
+            {
+                var idx = _exceptBans.FindIndex(b => string.Equals(b.Mask, mask, StringComparison.OrdinalIgnoreCase));
+                if (idx < 0) return false;
+                _exceptBans.RemoveAt(idx);
+                return true;
+            }
+        }
+
+        public bool AddInviteException(string mask, string setBy)
+        {
+            lock (_inviteExceptions)
+            {
+                if (_inviteExceptions.Any(b => string.Equals(b.Mask, mask, StringComparison.OrdinalIgnoreCase)))
+                    return false;
+
+                _inviteExceptions.Add(new ChannelBan(mask, setBy, DateTimeOffset.UtcNow));
+                return true;
+            }
+        }
+
+        public bool AddInviteException(string mask, string setBy, DateTimeOffset setAtUtc)
+        {
+            lock (_inviteExceptions)
+            {
+                if (_inviteExceptions.Any(b => string.Equals(b.Mask, mask, StringComparison.OrdinalIgnoreCase)))
+                    return false;
+
+                _inviteExceptions.Add(new ChannelBan(mask, setBy, setAtUtc));
+                return true;
+            }
+        }
+
+        public bool RemoveInviteException(string mask)
+        {
+            lock (_inviteExceptions)
+            {
+                var idx = _inviteExceptions.FindIndex(b => string.Equals(b.Mask, mask, StringComparison.OrdinalIgnoreCase));
+                if (idx < 0) return false;
+                _inviteExceptions.RemoveAt(idx);
                 return true;
             }
         }
@@ -238,6 +320,16 @@
             lock (_bans)
             {
                 _bans.Clear();
+            }
+
+            lock (_exceptBans)
+            {
+                _exceptBans.Clear();
+            }
+
+            lock (_inviteExceptions)
+            {
+                _inviteExceptions.Clear();
             }
 
             lock (_invitedNicks)

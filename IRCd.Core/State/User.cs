@@ -6,6 +6,8 @@
     {
         public string ConnectionId { get; init; } = default!;
 
+        public bool IsService { get; set; }
+
         public bool IsRemote { get; set; }
 
         public string? RemoteSid { get; set; }
