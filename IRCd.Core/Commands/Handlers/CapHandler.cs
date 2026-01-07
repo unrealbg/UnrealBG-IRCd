@@ -16,7 +16,17 @@ namespace IRCd.Core.Commands.Handlers
     {
         public string Command => "CAP";
 
-        private static readonly string[] SupportedCaps = ["server-time", "message-tags"]; 
+        private static readonly string[] SupportedCaps = 
+        [
+            "server-time", 
+            "message-tags",
+            "multi-prefix",
+            "away-notify",
+            "account-notify",
+            "extended-join",
+            "userhost-in-names",
+            "echo-message"
+        ]; 
 
         private readonly IOptions<IrcOptions> _options;
 

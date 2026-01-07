@@ -18,14 +18,14 @@ namespace IRCd.Core.Commands.Handlers
         public string Command => "KLINE";
 
         private readonly IOptions<IrcOptions> _options;
-        private readonly RuntimeKLineService _klines;
-        private readonly ISessionRegistry _sessions;
+        private readonly BanService _banService;
+        private readonly IBanEnforcer _enforcement;
 
-        public KlineHandler(IOptions<IrcOptions> options, RuntimeKLineService klines, ISessionRegistry sessions)
+        public KlineHandler(IOptions<IrcOptions> options, BanService banService, IBanEnforcer enforcement)
         {
             _options = options;
-            _klines = klines;
-            _sessions = sessions;
+            _banService = banService;
+            _enforcement = enforcement;
         }
 
         public async ValueTask HandleAsync(IClientSession session, Protocol.IrcMessage msg, ServerState state, CancellationToken ct)
@@ -56,42 +56,68 @@ namespace IRCd.Core.Commands.Handlers
             if (rawMask.StartsWith("-", StringComparison.Ordinal))
             {
                 var toRemove = rawMask.TrimStart('-').Trim();
-                var removed = _klines.Remove(toRemove);
+                var removed = await _banService.RemoveAsync(BanType.KLINE, toRemove, ct);
                 await session.SendAsync($":{serverName} NOTICE {me} :UNKLINE {(removed ? "removed" : "not found")} {toRemove}", ct);
                 return;
             }
 
             var mask = rawMask.Trim();
-            var reason = msg.Trailing;
-            if (string.IsNullOrWhiteSpace(reason) && msg.Params.Count >= 2)
+            
+            DateTimeOffset? expiresAt = null;
+            if (msg.Params.Count >= 2 && !string.IsNullOrWhiteSpace(msg.Params[1]))
             {
-                reason = msg.Params[1];
-            }
-
-            if (string.IsNullOrWhiteSpace(reason))
-                reason = "Banned";
-
-            _klines.AddOrReplace(mask, reason);
-
-            foreach (var u in state.GetAllUsers().Where(u => u.IsRegistered && !u.IsRemote).ToArray())
-            {
-                var nick = u.Nick ?? "*";
-                var userName = u.UserName ?? "user";
-                var host = u.Host ?? "localhost";
-
-                if (_klines.TryMatch(nick, userName, host, out var r))
+                var possibleDuration = msg.Params[1];
+                if (char.IsDigit(possibleDuration[0]) || possibleDuration.Equals("perm", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (_sessions.TryGet(u.ConnectionId, out var targetSession) && targetSession is not null)
+                    expiresAt = BanEntry.ParseDuration(possibleDuration);
+                    // Reason comes from trailing or next param
+                    var reason = msg.Trailing;
+                    if (string.IsNullOrWhiteSpace(reason) && msg.Params.Count >= 3)
                     {
-                        await targetSession.SendAsync($":{serverName} 465 {nick} :You are banned from this server ({r})", ct);
-                        await targetSession.CloseAsync("K-Lined", ct);
+                        reason = msg.Params[2];
                     }
+                    if (string.IsNullOrWhiteSpace(reason))
+                        reason = "Banned";
 
-                    state.RemoveUser(u.ConnectionId);
+                    var ban = new BanEntry
+                    {
+                        Type = BanType.KLINE,
+                        Mask = mask,
+                        Reason = reason,
+                        SetBy = me,
+                        ExpiresAt = expiresAt
+                    };
+
+                    await _banService.AddAsync(ban, ct);
+                    await _enforcement.EnforceBanImmediatelyAsync(ban, ct);
+
+                    var expireText = expiresAt.HasValue ? $"expires {expiresAt.Value:yyyy-MM-dd HH:mm:ss} UTC" : "permanent";
+                    await session.SendAsync($":{serverName} NOTICE {me} :KLINE added {mask} ({expireText}) :{reason}", ct);
+                    return;
                 }
             }
 
-            await session.SendAsync($":{serverName} NOTICE {me} :KLINE added {mask} :{reason}", ct);
+            var banReason = msg.Trailing;
+            if (string.IsNullOrWhiteSpace(banReason) && msg.Params.Count >= 2)
+            {
+                banReason = msg.Params[1];
+            }
+            if (string.IsNullOrWhiteSpace(banReason))
+                banReason = "Banned";
+
+            var permanentBan = new BanEntry
+            {
+                Type = BanType.KLINE,
+                Mask = mask,
+                Reason = banReason,
+                SetBy = me,
+                ExpiresAt = null
+            };
+
+            await _banService.AddAsync(permanentBan, ct);
+            await _enforcement.EnforceBanImmediatelyAsync(permanentBan, ct);
+
+            await session.SendAsync($":{serverName} NOTICE {me} :KLINE added {mask} (permanent) :{banReason}", ct);
         }
     }
 }

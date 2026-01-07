@@ -72,7 +72,7 @@ namespace IRCd.Core.Commands.Handlers
             }
 
             var user = session.UserName ?? "u";
-            var host = _hostmask.GetDisplayedHost((session.RemoteEndPoint as System.Net.IPEndPoint)?.Address);
+                var host = state.GetHostFor(session.ConnectionId);
             var line = $":{me}!{user}@{host} KNOCK {channelName} :{(text ?? string.Empty)}";
 
             foreach (var m in ch.Members.Where(m => m.Privilege.IsAtLeast(ChannelPrivilege.Op)).ToArray())

@@ -77,6 +77,12 @@ namespace IRCd.Core.Commands.Handlers
                 return;
             }
 
+            if (targetUser.IsService)
+            {
+                await session.SendAsync($":{serverName} NOTICE {me} :Cannot KILL services", ct);
+                return;
+            }
+
             var killQuit = $"Killed ({me}: {reason})";
 
             if (targetUser.IsRemote)

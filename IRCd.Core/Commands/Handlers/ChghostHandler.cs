@@ -87,6 +87,12 @@ namespace IRCd.Core.Commands.Handlers
                 return;
             }
 
+            if (targetUser.IsService)
+            {
+                await session.SendAsync($":{serverName} NOTICE {me} :Cannot CHGHOST services", ct);
+                return;
+            }
+
             if (targetUser.IsRemote)
             {
                 await session.SendAsync($":{serverName} NOTICE {me} :Cannot CHGHOST remote users", ct);

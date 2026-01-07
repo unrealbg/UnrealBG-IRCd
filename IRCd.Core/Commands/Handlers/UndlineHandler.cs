@@ -16,12 +16,12 @@ namespace IRCd.Core.Commands.Handlers
         public string Command => "UNDLINE";
 
         private readonly IOptions<IrcOptions> _options;
-        private readonly RuntimeDLineService _dlines;
+        private readonly BanService _banService;
 
-        public UndlineHandler(IOptions<IrcOptions> options, RuntimeDLineService dlines)
+        public UndlineHandler(IOptions<IrcOptions> options, BanService banService)
         {
             _options = options;
-            _dlines = dlines;
+            _banService = banService;
         }
 
         public async ValueTask HandleAsync(IClientSession session, Protocol.IrcMessage msg, ServerState state, CancellationToken ct)
@@ -48,7 +48,7 @@ namespace IRCd.Core.Commands.Handlers
             }
 
             var mask = (msg.Params[0] ?? string.Empty).Trim();
-            var removed = _dlines.Remove(mask);
+            var removed = await _banService.RemoveAsync(BanType.DLINE, mask, ct);
 
             await session.SendAsync($":{serverName} NOTICE {me} :UNDLINE {(removed ? "removed" : "not found")} {mask}", ct);
         }

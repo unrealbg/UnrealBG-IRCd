@@ -56,7 +56,7 @@ namespace IRCd.Core.Commands.Handlers
 
             var fromNick = session.Nick ?? "*";
             var fromUser = session.UserName ?? "u";
-            var host = _hostmask.GetDisplayedHost((session.RemoteEndPoint as System.Net.IPEndPoint)?.Address);
+            var host = state.GetHostFor(session.ConnectionId);
             var prefix = $":{fromNick}!{fromUser}@{host}";
             var fromHostmask = $"{fromNick}!{fromUser}@{host}";
 
@@ -103,6 +103,11 @@ namespace IRCd.Core.Commands.Handlers
                     var line = $"{prefix} NOTICE {t} :{text}";
                     await _routing.BroadcastToChannelAsync(channel, line, excludeConnectionId: session.ConnectionId, ct);
 
+                    if (session.EnabledCapabilities.Contains("echo-message"))
+                    {
+                        await session.SendAsync(line, ct);
+                    }
+
                     if (state.TryGetUser(session.ConnectionId, out var fromU) && fromU is not null && !string.IsNullOrWhiteSpace(fromU.Uid))
                     {
                         await _links.PropagateNoticeAsync(fromU.Uid!, t, text, ct);
@@ -131,6 +136,11 @@ namespace IRCd.Core.Commands.Handlers
 
                 var noticeLine = $"{prefix} NOTICE {t} :{text}";
                 await _routing.SendToUserAsync(targetConn, noticeLine, ct);
+
+                if (session.EnabledCapabilities.Contains("echo-message"))
+                {
+                    await session.SendAsync(noticeLine, ct);
+                }
 
                 if (state.TryGetUser(session.ConnectionId, out var fromU2) && fromU2 is not null && !string.IsNullOrWhiteSpace(fromU2.Uid))
                 {

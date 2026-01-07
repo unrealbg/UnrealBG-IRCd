@@ -73,6 +73,12 @@ namespace IRCd.Core.Commands.Handlers
                 return;
             }
 
+            if (targetUser.IsService)
+            {
+                await session.SendAsync($":{server} NOTICE {me} :Cannot SVS2MODE services", ct);
+                return;
+            }
+
             var sign = modeToken[0];
             var changed = false;
             for (int i = 1; i < modeToken.Length; i++)

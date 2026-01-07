@@ -87,7 +87,7 @@
 
             if (_serviceEvents is not null)
             {
-                await _serviceEvents.OnQuitAsync(session.ConnectionId, ct);
+                await _serviceEvents.OnQuitAsync(session, reason, state, ct);
             }
 
             await session.CloseAsync(reason, ct);

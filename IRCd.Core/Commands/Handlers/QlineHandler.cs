@@ -1,7 +1,6 @@
 namespace IRCd.Core.Commands.Handlers
 {
     using System;
-    using System.Linq;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -13,15 +12,15 @@ namespace IRCd.Core.Commands.Handlers
 
     using Microsoft.Extensions.Options;
 
-    public sealed class DlineHandler : IIrcCommandHandler
+    public sealed class QlineHandler : IIrcCommandHandler
     {
-        public string Command => "DLINE";
+        public string Command => "QLINE";
 
         private readonly IOptions<IrcOptions> _options;
         private readonly BanService _banService;
         private readonly IBanEnforcer _enforcement;
 
-        public DlineHandler(IOptions<IrcOptions> options, BanService banService, IBanEnforcer enforcement)
+        public QlineHandler(IOptions<IrcOptions> options, BanService banService, IBanEnforcer enforcement)
         {
             _options = options;
             _banService = banService;
@@ -39,7 +38,7 @@ namespace IRCd.Core.Commands.Handlers
             var me = session.Nick!;
             var serverName = _options.Value.ServerInfo?.Name ?? "server";
 
-            if (!state.TryGetUser(session.ConnectionId, out var user) || user is null || !OperCapabilityService.HasCapability(_options.Value, user, "dline"))
+            if (!state.TryGetUser(session.ConnectionId, out var user) || user is null || !OperCapabilityService.HasCapability(_options.Value, user, "qline"))
             {
                 await session.SendAsync($":{serverName} 481 {me} :Permission Denied- You're not an IRC operator", ct);
                 return;
@@ -47,7 +46,7 @@ namespace IRCd.Core.Commands.Handlers
 
             if (msg.Params.Count < 1)
             {
-                await session.SendAsync($":{serverName} 461 {me} DLINE :Not enough parameters", ct);
+                await session.SendAsync($":{serverName} 461 {me} QLINE :Not enough parameters", ct);
                 return;
             }
 
@@ -56,8 +55,8 @@ namespace IRCd.Core.Commands.Handlers
             if (rawMask.StartsWith("-", StringComparison.Ordinal))
             {
                 var toRemove = rawMask.TrimStart('-').Trim();
-                var removed = await _banService.RemoveAsync(BanType.DLINE, toRemove, ct);
-                await session.SendAsync($":{serverName} NOTICE {me} :UNDLINE {(removed ? "removed" : "not found")} {toRemove}", ct);
+                var removed = await _banService.RemoveAsync(BanType.QLINE, toRemove, ct);
+                await session.SendAsync($":{serverName} NOTICE {me} :UNQLINE {(removed ? "removed" : "not found")} {toRemove}", ct);
                 return;
             }
 
@@ -76,11 +75,11 @@ namespace IRCd.Core.Commands.Handlers
                         reason = msg.Params[2];
                     }
                     if (string.IsNullOrWhiteSpace(reason))
-                        reason = "Banned";
+                        reason = "Reserved nickname";
 
                     var ban = new BanEntry
                     {
-                        Type = BanType.DLINE,
+                        Type = BanType.QLINE,
                         Mask = mask,
                         Reason = reason,
                         SetBy = me,
@@ -91,7 +90,7 @@ namespace IRCd.Core.Commands.Handlers
                     await _enforcement.EnforceBanImmediatelyAsync(ban, ct);
 
                     var expireText = expiresAt.HasValue ? $"expires {expiresAt.Value:yyyy-MM-dd HH:mm:ss} UTC" : "permanent";
-                    await session.SendAsync($":{serverName} NOTICE {me} :DLINE added {mask} ({expireText}) :{reason}", ct);
+                    await session.SendAsync($":{serverName} NOTICE {me} :QLINE added {mask} ({expireText}) :{reason}", ct);
                     return;
                 }
             }
@@ -102,11 +101,11 @@ namespace IRCd.Core.Commands.Handlers
                 banReason = msg.Params[1];
             }
             if (string.IsNullOrWhiteSpace(banReason))
-                banReason = "Banned";
+                banReason = "Reserved nickname";
 
             var permanentBan = new BanEntry
             {
-                Type = BanType.DLINE,
+                Type = BanType.QLINE,
                 Mask = mask,
                 Reason = banReason,
                 SetBy = me,
@@ -116,7 +115,7 @@ namespace IRCd.Core.Commands.Handlers
             await _banService.AddAsync(permanentBan, ct);
             await _enforcement.EnforceBanImmediatelyAsync(permanentBan, ct);
 
-            await session.SendAsync($":{serverName} NOTICE {me} :DLINE added {mask} (permanent) :{banReason}", ct);
+            await session.SendAsync($":{serverName} NOTICE {me} :QLINE added {mask} (permanent) :{banReason}", ct);
         }
     }
 }
