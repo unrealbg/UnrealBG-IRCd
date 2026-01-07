@@ -4,6 +4,7 @@
     using System.Collections.Generic;
     using System.IO;
     using System.Linq;
+    using System.Net;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -21,13 +22,15 @@
         private readonly IMetrics _metrics;
         private readonly WatchService _watch;
         private readonly ConnectionAuthService? _auth;
+        private readonly BanService _banService;
 
-        public RegistrationService(IOptions<IrcOptions> options, MotdSender motd, IMetrics metrics, WatchService watch, ConnectionAuthService? auth = null)
+        public RegistrationService(IOptions<IrcOptions> options, MotdSender motd, IMetrics metrics, WatchService watch, BanService banService, ConnectionAuthService? auth = null)
         {
             _options = options;
             _motd = motd;
             _metrics = metrics;
             _watch = watch;
+            _banService = banService;
             _auth = auth;
         }
 
@@ -63,11 +66,24 @@
 
                 user.LastActivityUtc = DateTimeOffset.UtcNow;
 
-                if (TryMatchKLine(session.Nick!, session.UserName!, user.Host ?? "localhost", out var reason))
+                var remoteIp = session.RemoteEndPoint is System.Net.IPEndPoint ipEndPoint ? ipEndPoint.Address : null;
+                var bans = await _banService.TryMatchSessionAsync(session.Nick!, session.UserName!, user.Host ?? "localhost", remoteIp, ct);
+                
+                if (bans.Count > 0)
                 {
+                    var ban = bans[0]; // Use first matching ban
                     var serverName2 = _options.Value.ServerInfo?.Name ?? "server";
-                    await session.SendAsync($":{serverName2} 465 {session.Nick} :You are banned from this server ({reason})", ct);
-                    await session.CloseAsync("K-Lined", ct);
+                    var banTypeText = ban.Type switch
+                    {
+                        State.BanType.KLINE => "K-Lined",
+                        State.BanType.DLINE => "D-Lined",
+                        State.BanType.ZLINE => "Z-Lined",
+                        State.BanType.QLINE => "Q-Lined",
+                        State.BanType.AKILL => "AKilled",
+                        _ => "Banned"
+                    };
+                    await session.SendAsync($":{serverName2} 465 {session.Nick} :You are banned from this server ({ban.Reason})", ct);
+                    await session.CloseAsync(banTypeText, ct);
                     return;
                 }
 
@@ -87,13 +103,13 @@
             }
 
             const string userModeLetters = "ioZ";
-            const string channelModeLetters = "bklimnpst";
+            const string channelModeLetters = "beIklimnpst";
 
             var isupport = _options.Value.Isupport ?? new IsupportOptions();
 
             var prefix = string.IsNullOrWhiteSpace(isupport.Prefix) ? "(ov)@+" : isupport.Prefix;
             var chanTypes = string.IsNullOrWhiteSpace(isupport.ChanTypes) ? "#" : isupport.ChanTypes;
-            var chanModesIsupport = string.IsNullOrWhiteSpace(isupport.ChanModes) ? "b,k,l,imnpst" : isupport.ChanModes;
+            var chanModesIsupport = string.IsNullOrWhiteSpace(isupport.ChanModes) ? "beI,k,l,imnpst" : isupport.ChanModes;
             var nickLen = isupport.NickLen > 0 ? isupport.NickLen : 20;
             var chanLen = isupport.ChanLen > 0 ? isupport.ChanLen : 50;
             var topicLen = isupport.TopicLen > 0 ? isupport.TopicLen : 300;
@@ -116,7 +132,7 @@
             await session.SendAsync($":{serverName} 004 {nick} {serverName} {serverVersion} {userModeLetters} {channelModeLetters}", ct);
 
             await session.SendAsync(
-                $":{serverName} 005 {nick} CALLERID CASEMAPPING={caseMapping} DEAF=D KICKLEN={kickLen} MODES={maxModes} NICKLEN={nickLen} PREFIX={prefix} STATUSMSG={statusMsg} TOPICLEN={topicLen} NETWORK={networkName} MAXLIST=beI:25 MAXTARGETS=4 CHANTYPES={chanTypes} :are supported by this server",
+                $":{serverName} 005 {nick} CALLERID CASEMAPPING={caseMapping} DEAF=D KICKLEN={kickLen} MODES={maxModes} NICKLEN={nickLen} PREFIX={prefix} STATUSMSG={statusMsg} TOPICLEN={topicLen} NETWORK={networkName} MAXLIST=beI:60 CHANTYPES={chanTypes} :are supported by this server",
                 ct);
             await session.SendAsync(
                 $":{serverName} 005 {nick} CHANLIMIT={chanTypes}:25 CHANNELLEN={chanLen} CHANMODES={chanModesIsupport} AWAYLEN={awayLen} ELIST={elist} SAFELIST KNOCK :are supported by this server",
@@ -136,34 +152,6 @@
             await session.SendAsync($":{serverName} 250 {nick} :Highest connection count: {users} ({users} clients) ({users} connections received)", ct);
 
             await _motd.TrySendMotdAsync(session, ct);
-        }
-
-        private bool TryMatchKLine(string nick, string userName, string host, out string reason)
-        {
-            reason = "Banned";
-
-            var klines = _options.Value.KLines;
-            if (klines is null || klines.Length == 0)
-                return false;
-
-            var full = $"{nick}!{userName}@{host}";
-
-            foreach (var k in klines)
-            {
-                if (k is null || string.IsNullOrWhiteSpace(k.Mask))
-                    continue;
-
-                var mask = k.Mask.Trim();
-                var value = (mask.Contains('!') || mask.Contains('@')) ? full : host;
-
-                if (MaskMatcher.IsMatch(mask, value))
-                {
-                    reason = string.IsNullOrWhiteSpace(k.Reason) ? "Banned" : k.Reason;
-                    return true;
-                }
-            }
-
-            return false;
         }
     }
 }

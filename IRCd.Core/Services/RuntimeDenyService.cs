@@ -2,17 +2,18 @@ namespace IRCd.Core.Services
 {
     using System;
     using System.Collections.Generic;
+    using System.Linq;
 
     using IRCd.Shared.Options;
 
     using Microsoft.Extensions.Options;
 
-    public sealed class RuntimeDLineService
+    public sealed class RuntimeDenyService
     {
         private readonly IOptions<IrcOptions> _options;
         private readonly object _lock = new();
 
-        public RuntimeDLineService(IOptions<IrcOptions> options)
+        public RuntimeDenyService(IOptions<IrcOptions> options)
         {
             _options = options;
         }
@@ -27,22 +28,22 @@ namespace IRCd.Core.Services
             lock (_lock)
             {
                 var o = _options.Value;
-                var list = new List<DLineOptions>(o.DLines ?? Array.Empty<DLineOptions>());
+                var list = new List<DenyOptions>(o.Denies ?? Array.Empty<DenyOptions>());
 
-                var trimmed = mask.Trim();
-                var existingIdx = list.FindIndex(d => d is not null && string.Equals(d.Mask?.Trim(), trimmed, StringComparison.OrdinalIgnoreCase));
-                var dl = new DLineOptions { Mask = trimmed, Reason = string.IsNullOrWhiteSpace(reason) ? "Banned" : reason };
+                var key = mask.Trim();
+                var idx = list.FindIndex(d => d is not null && string.Equals(d.Mask?.Trim(), key, StringComparison.OrdinalIgnoreCase));
+                var item = new DenyOptions { Mask = key, Reason = string.IsNullOrWhiteSpace(reason) ? "Denied" : reason };
 
-                if (existingIdx >= 0)
+                if (idx >= 0)
                 {
-                    list[existingIdx] = dl;
+                    list[idx] = item;
                 }
                 else
                 {
-                    list.Add(dl);
+                    list.Add(item);
                 }
 
-                o.DLines = list.ToArray();
+                o.Denies = list.ToArray();
             }
         }
 
@@ -56,12 +57,13 @@ namespace IRCd.Core.Services
             lock (_lock)
             {
                 var o = _options.Value;
-                var list = new List<DLineOptions>(o.DLines ?? Array.Empty<DLineOptions>());
+                var list = new List<DenyOptions>(o.Denies ?? Array.Empty<DenyOptions>());
                 var before = list.Count;
 
-                list.RemoveAll(d => d is not null && string.Equals(d.Mask?.Trim(), mask.Trim(), StringComparison.OrdinalIgnoreCase));
+                var key = mask.Trim();
+                list.RemoveAll(d => d is not null && string.Equals(d.Mask?.Trim(), key, StringComparison.OrdinalIgnoreCase));
 
-                o.DLines = list.ToArray();
+                o.Denies = list.ToArray();
                 return before != list.Count;
             }
         }
@@ -70,28 +72,23 @@ namespace IRCd.Core.Services
         {
             lock (_lock)
             {
-                _options.Value.DLines = Array.Empty<DLineOptions>();
+                _options.Value.Denies = Array.Empty<DenyOptions>();
             }
         }
 
-        public bool TryMatch(string remoteIp, out string reason)
+        public bool TryMatch(string nick, string userName, string host, out string reason)
         {
-            reason = "Banned";
+            reason = "Denied";
 
-            if (string.IsNullOrWhiteSpace(remoteIp))
+            var denies = _options.Value.Denies;
+            if (denies is null || denies.Length == 0)
             {
                 return false;
             }
 
-            var dlines = _options.Value.DLines;
-            if (dlines is null || dlines.Length == 0)
-            {
-                return false;
-            }
+            var full = $"{nick}!{userName}@{host}";
 
-            var value = remoteIp.Trim();
-
-            foreach (var d in dlines)
+            foreach (var d in denies)
             {
                 if (d is null || string.IsNullOrWhiteSpace(d.Mask))
                 {
@@ -99,9 +96,11 @@ namespace IRCd.Core.Services
                 }
 
                 var mask = d.Mask.Trim();
+                var value = (mask.Contains('!') || mask.Contains('@')) ? full : nick;
+
                 if (MaskMatcher.IsMatch(mask, value))
                 {
-                    reason = string.IsNullOrWhiteSpace(d.Reason) ? "Banned" : d.Reason;
+                    reason = string.IsNullOrWhiteSpace(d.Reason) ? "Denied" : d.Reason;
                     return true;
                 }
             }
