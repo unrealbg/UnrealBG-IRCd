@@ -16,6 +16,12 @@
 
         public DLineOptions[] DLines { get; set; } = Array.Empty<DLineOptions>();
 
+        public DenyOptions[] Denies { get; set; } = Array.Empty<DenyOptions>();
+
+        public WarnOptions[] Warns { get; set; } = Array.Empty<WarnOptions>();
+
+        public TriggerOptions[] Triggers { get; set; } = Array.Empty<TriggerOptions>();
+
         public ServerInfoOptions ServerInfo { get; set; } = new();
 
         public ListenOptions Listen { get; set; } = new();
