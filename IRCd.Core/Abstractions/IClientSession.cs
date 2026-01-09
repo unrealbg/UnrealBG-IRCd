@@ -12,6 +12,10 @@
 
         bool IsSecureConnection { get; }
 
+        string? ClientCertificateSubject => null;
+
+        string? ClientCertificateFingerprintSha256 => null;
+
         ISet<string> EnabledCapabilities { get; }
 
         string? Nick { get; set; }
