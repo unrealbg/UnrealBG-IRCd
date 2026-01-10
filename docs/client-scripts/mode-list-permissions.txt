@@ -1,0 +1,48 @@
+# MODE list modes (+b/+e/+I) + permissions
+#
+# Setup assumptions:
+# - You are connected and registered.
+# - You have at least two nicks available (or two clients): Alice (op) and Bob (non-op).
+
+# As Bob (not on channel): expect 442
+C: MODE #c +b
+S: :server 442 <yournick> #c :You're not on that channel
+
+# Join #c
+C: JOIN #c
+
+# As non-op member: expect 482 for list modes
+C: MODE #c +b
+S: :server 482 <yournick> #c :You're not channel operator
+
+C: MODE #c +e
+S: :server 482 <yournick> #c :You're not channel operator
+
+C: MODE #c +I
+S: :server 482 <yournick> #c :You're not channel operator
+
+# As channel op: add entries, then list
+# Add a ban
+C: MODE #c +b bad!*@*
+S: :<opnick>!<user>@<host> MODE #c +b bad!*@*
+
+# List bans
+C: MODE #c +b
+S: :server 367 <opnick> #c bad!*@* <setter> <setTs>
+S: :server 368 <opnick> #c :End of Channel Ban List
+
+# Add exception and list
+C: MODE #c +e good!*@*
+S: :<opnick>!<user>@<host> MODE #c +e good!*@*
+
+C: MODE #c +e
+S: :server 348 <opnick> #c good!*@* <setter> <setTs>
+S: :server 349 <opnick> #c :End of Channel Exception List
+
+# Add invite exception and list
+C: MODE #c +I Bob!*@host
+S: :<opnick>!<user>@<host> MODE #c +I Bob!*@host
+
+C: MODE #c +I
+S: :server 346 <opnick> #c Bob!*@host <setter> <setTs>
+S: :server 347 <opnick> #c :End of Channel Invite Exception List

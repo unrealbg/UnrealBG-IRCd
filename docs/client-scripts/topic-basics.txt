@@ -1,0 +1,23 @@
+# TOPIC basics
+#
+# Setup assumptions:
+# - You are connected and registered.
+# - You have a channel #c you can join.
+#
+# C: lines are what you send. Remove the 'C: ' prefix.
+# S: lines describe what you should see.
+
+C: JOIN #c
+
+# Query when no topic set
+C: TOPIC #c
+S: :server 331 <yournick> #c :No topic is set
+
+# Set topic (must be on channel; if +t set, must be op)
+C: TOPIC #c :New topic
+S: :<yournick>!<user>@<host> TOPIC #c :New topic
+
+# Query after set
+C: TOPIC #c
+S: :server 332 <yournick> #c :New topic
+S: :server 333 <yournick> #c <setter> <topicTs>

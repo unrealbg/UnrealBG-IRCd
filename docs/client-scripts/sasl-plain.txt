@@ -1,0 +1,30 @@
+# CAP + SASL PLAIN flow (manual)
+#
+# This is a generic reference flow. Exact success depends on your auth backend.
+#
+# Many clients do this automatically when configured for SASL.
+
+# CAP negotiation
+C: CAP LS
+S: :server CAP * LS :... sasl=PLAIN ...
+
+C: CAP REQ :sasl
+S: :server CAP * ACK :sasl
+
+# SASL PLAIN start
+C: AUTHENTICATE PLAIN
+S: AUTHENTICATE +
+
+# Send base64("\0username\0password")
+# Example for username=alice password=password:
+C: AUTHENTICATE AGFsaWNlAHBhc3N3b3Jk
+
+# Success:
+S: :server 900 * * alice :You are now logged in as alice
+S: :server 903 * :SASL authentication successful
+
+# Failure:
+S: :server 904 * :SASL authentication failed
+
+# Finish CAP
+C: CAP END
