@@ -9,11 +9,13 @@ This runbook covers common “bad day” scenarios:
 ## 0) First response (5 minutes)
 
 1. Confirm scope
+
    - Is it one server or multiple?
    - Is it only on plaintext (`6667`) or also TLS (`6697`)?
    - Is it only a single IP/subnet?
 
 2. Check health and basic load
+
    - If enabled: `GET /healthz` should be `200`.
    - If enabled: `GET /metrics` and look at:
      - `ircd_connections_active`
@@ -30,16 +32,19 @@ This runbook covers common “bad day” scenarios:
 ### Immediate containment
 
 1. Tighten connection guard
+
    - Edit your active config (or temporarily switch to `conf/examples/public.conf`) and ensure:
      - `security { profile = "public"; }`
      - `connectionguard { enabled = true; ... }`
 
 2. Prefer TLS-only during an attack
+
    - In `listen { ... }`, set:
      - `clientport = 0;` (disable plaintext)
      - keep `enabletls = true; tlsclientport = 6697;`
 
 3. Block obviously abusive IPs
+
    - Use OperServ (recommended):
      - `/MSG OperServ DLINE <ip-or-mask> <reason>`
      - Example: `/MSG OperServ DLINE 203.0.113.* attack`
@@ -64,9 +69,11 @@ This runbook covers common “bad day” scenarios:
 ### Immediate containment
 
 1. Ensure rate limiting is enabled
+
    - `ratelimit { enabled = true; ... disconnect { enabled = true; ... } }`
 
 2. Consider a temporary IP ban for obvious sources
+
    - `/MSG OperServ DLINE <ip-or-mask> <reason>`
 
 3. Operator actions
@@ -84,10 +91,12 @@ This runbook covers common “bad day” scenarios:
 ### Immediate containment
 
 1. Remove the attacker’s access
+
    - If you can, DLINE the source IP.
    - If you cannot trust the running process, stop the server and proceed offline.
 
 2. Rotate oper passwords (see `key-rotation-oper-passwords.md`)
+
    - Treat this as urgent.
 
 3. Verify configuration integrity

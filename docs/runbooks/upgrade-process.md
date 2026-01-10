@@ -11,6 +11,7 @@ This runbook upgrades the server with a clear rollback path.
 ## 2) Build and stage
 
 - Build the server:
+
   - `dotnet build -c Release`
 
 - Stage configuration changes separately from binaries.

@@ -42,6 +42,7 @@ This prevents accidental regression back to plaintext passwords.
 ## 4) Apply the change
 
 - Preferred: reload config via OperServ (requires oper capability `rehash`):
+
   - `/MSG OperServ REHASH`
 
 - Otherwise: restart the process/service.
@@ -60,5 +61,5 @@ This prevents accidental regression back to plaintext passwords.
 
 ## Notes
 
-- If you suspect compromise, rotate passwords *after* collecting logs/evidence.
+- If you suspect compromise, rotate passwords _after_ collecting logs/evidence.
 - Prefer unique strong passwords per operator.
