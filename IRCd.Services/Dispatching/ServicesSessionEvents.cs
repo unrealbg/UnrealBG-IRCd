@@ -7,7 +7,6 @@ namespace IRCd.Services.Dispatching
 
     using IRCd.Core.Abstractions;
     using IRCd.Core.State;
-    using IRCd.Services.Auth;
     using IRCd.Services.SeenServ;
     using IRCd.Services.Storage;
     using IRCd.Shared.Options;
