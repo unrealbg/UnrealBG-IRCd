@@ -22,7 +22,7 @@ and emit a single combined `samples.csv` containing both client-side and server-
 
 Run against a locally running IRCd:
 
-```bash
+````bash
 dotnet run --project IRCd.LoadTest -c Release -- \
   --host 127.0.0.1 --port 6667 \
   --clients 1000 --duration 60 \
@@ -39,8 +39,9 @@ dotnet run --project IRCd.LoadTest -c Release -- \
   --scenario churn --seed 12345 \
   --ramp-seconds 15 \
   --out .artifacts/soak
-```
-```
+````
+
+````
 
 Write a CSV time series:
 
@@ -63,7 +64,8 @@ dotnet run --project IRCd.LoadTest -c Release -- \
   --clients 500 --duration 900 \
   --out .artifacts/soak \
   --keep-logs
-```
+````
+
 ```
 
 ## Recommended runs
@@ -84,3 +86,4 @@ dotnet run --project IRCd.LoadTest -c Release -- \
 
 - Results are intended to be repeatable via `--seed` (client nicknames and channel selection are deterministic).
 - The tool intentionally avoids TLS/SASL and sticks to the basic `NICK`/`USER` registration flow.
+```
