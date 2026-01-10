@@ -8,5 +8,9 @@ namespace IRCd.Core.Abstractions
         long ChannelsCreatedTotal,
         long CommandsTotal,
         double CommandsPerSecond,
-        long FloodKicksTotal);
+        long FloodKicksTotal,
+        long OutboundQueueDepth,
+        long OutboundQueueMaxDepth,
+        long OutboundQueueDroppedTotal,
+        long OutboundQueueOverflowDisconnectsTotal);
 }

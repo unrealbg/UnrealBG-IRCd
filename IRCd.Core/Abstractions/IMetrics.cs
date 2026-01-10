@@ -14,6 +14,12 @@
 
         void FloodKick();
 
+        void OutboundQueueDepth(long depth);
+
+        void OutboundQueueDrop();
+
+        void OutboundQueueOverflowDisconnect();
+
         MetricsSnapshot GetSnapshot();
     }
 }
