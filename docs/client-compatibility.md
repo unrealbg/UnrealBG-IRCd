@@ -57,8 +57,8 @@ These are intentionally raw IRC command sequences with “expected output” not
 Fill this in as you validate against real clients. Don’t rely on this table unless it is populated with your own results.
 
 | Client | Version | TLS | SASL | Notes | Validated by | Date |
-|---|---:|:---:|:---:|---|---|---|
-| (add) |  |  |  |  |  |  |
+| ------ | ------: | :-: | :--: | ----- | ------------ | ---- |
+| (add)  |         |     |      |       |              |      |
 
 ## Notes / common expectations
 
