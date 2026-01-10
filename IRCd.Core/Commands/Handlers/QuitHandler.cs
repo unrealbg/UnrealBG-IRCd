@@ -20,15 +20,17 @@
         private readonly WhowasService _whowas;
         private readonly SilenceService _silence;
         private readonly WatchService _watch;
+        private readonly SaslService? _sasl;
         private readonly IServiceSessionEvents? _serviceEvents;
 
-        public QuitHandler(RoutingService routing, ServerLinkService links, WhowasService whowas, SilenceService silence, WatchService watch, IServiceSessionEvents? serviceEvents = null)
+        public QuitHandler(RoutingService routing, ServerLinkService links, WhowasService whowas, SilenceService silence, WatchService watch, SaslService? sasl = null, IServiceSessionEvents? serviceEvents = null)
         {
             _routing = routing;
             _links = links;
             _whowas = whowas;
             _silence = silence;
             _watch = watch;
+            _sasl = sasl;
             _serviceEvents = serviceEvents;
         }
 
@@ -84,6 +86,7 @@
 
             _silence.RemoveAll(session.ConnectionId);
             _watch.RemoveAll(session.ConnectionId);
+            _sasl?.Clear(session.ConnectionId);
 
             if (_serviceEvents is not null)
             {

@@ -1,6 +1,8 @@
 namespace IRCd.Core.Commands.Handlers
 {
     using System;
+    using System.Collections.Generic;
+    using System.Net;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -19,12 +21,14 @@ namespace IRCd.Core.Commands.Handlers
         private readonly IOptions<IrcOptions> _options;
         private readonly BanService _banService;
         private readonly IBanEnforcer _enforcement;
+        private readonly IAuditLogService _audit;
 
-        public QlineHandler(IOptions<IrcOptions> options, BanService banService, IBanEnforcer enforcement)
+        public QlineHandler(IOptions<IrcOptions> options, BanService banService, IBanEnforcer enforcement, IAuditLogService? audit = null)
         {
             _options = options;
             _banService = banService;
             _enforcement = enforcement;
+            _audit = audit ?? NullAuditLogService.Instance;
         }
 
         public async ValueTask HandleAsync(IClientSession session, Protocol.IrcMessage msg, ServerState state, CancellationToken ct)
@@ -44,6 +48,8 @@ namespace IRCd.Core.Commands.Handlers
                 return;
             }
 
+            var sourceIp = user.RemoteIp ?? (session.RemoteEndPoint as IPEndPoint)?.Address.ToString();
+
             if (msg.Params.Count < 1)
             {
                 await session.SendAsync($":{serverName} 461 {me} QLINE :Not enough parameters", ct);
@@ -57,6 +63,17 @@ namespace IRCd.Core.Commands.Handlers
                 var toRemove = rawMask.TrimStart('-').Trim();
                 var removed = await _banService.RemoveAsync(BanType.QLINE, toRemove, ct);
                 await session.SendAsync($":{serverName} NOTICE {me} :UNQLINE {(removed ? "removed" : "not found")} {toRemove}", ct);
+
+                await _audit.LogOperActionAsync(
+                    action: "UNQLINE",
+                    session: session,
+                    actorUid: user.Uid,
+                    actorNick: user.Nick ?? me,
+                    sourceIp: sourceIp,
+                    target: toRemove,
+                    reason: null,
+                    extra: new Dictionary<string, object?> { ["banType"] = "QLINE", ["removed"] = removed },
+                    ct: ct);
                 return;
             }
 
@@ -91,6 +108,17 @@ namespace IRCd.Core.Commands.Handlers
 
                     var expireText = expiresAt.HasValue ? $"expires {expiresAt.Value:yyyy-MM-dd HH:mm:ss} UTC" : "permanent";
                     await session.SendAsync($":{serverName} NOTICE {me} :QLINE added {mask} ({expireText}) :{reason}", ct);
+
+                    await _audit.LogOperActionAsync(
+                        action: "QLINE",
+                        session: session,
+                        actorUid: user.Uid,
+                        actorNick: user.Nick ?? me,
+                        sourceIp: sourceIp,
+                        target: mask,
+                        reason: reason,
+                        extra: new Dictionary<string, object?> { ["banType"] = "QLINE", ["expiresAtUtc"] = expiresAt },
+                        ct: ct);
                     return;
                 }
             }
@@ -116,6 +144,17 @@ namespace IRCd.Core.Commands.Handlers
             await _enforcement.EnforceBanImmediatelyAsync(permanentBan, ct);
 
             await session.SendAsync($":{serverName} NOTICE {me} :QLINE added {mask} (permanent) :{banReason}", ct);
+
+            await _audit.LogOperActionAsync(
+                action: "QLINE",
+                session: session,
+                actorUid: user.Uid,
+                actorNick: user.Nick ?? me,
+                sourceIp: sourceIp,
+                target: mask,
+                reason: banReason,
+                extra: new Dictionary<string, object?> { ["banType"] = "QLINE", ["expiresAtUtc"] = null },
+                ct: ct);
         }
     }
 }

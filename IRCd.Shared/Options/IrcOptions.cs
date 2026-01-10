@@ -38,7 +38,11 @@
 
         public TransportOptions Transport { get; set; } = new();
 
+        public SecurityOptions Security { get; set; } = new();
+
         public FloodOptions Flood { get; set; } = new();
+
+        public SaslOptions Sasl { get; set; } = new();
 
         public AuthOptions Auth { get; set; } = new();
 
@@ -48,10 +52,31 @@
 
         public ConnectionGuardOptions ConnectionGuard { get; set; } = new();
 
+        public ConnectionPrecheckOptions ConnectionPrecheck { get; set; } = new();
+
         public CommandLimitsOptions Limits { get; set; } = new();
 
         public IsupportOptions Isupport { get; set; } = new();
 
         public ServicesOptions Services { get; set; } = new();
+
+        public BansOptions Bans { get; set; } = new();
+
+        public ObservabilityOptions Observability { get; set; } = new();
+
+        public AuditOptions Audit { get; set; } = new();
+
+        public OperSecurityOptions OperSecurity { get; set; } = new();
+
+        public AutoDlineOptions AutoDline { get; set; } = new();
     }
+}
+
+public sealed class SecurityOptions
+{
+    /// <summary>
+    /// Built-in configuration profile.
+    /// Values: default | public | trusted-lan
+    /// </summary>
+    public string Profile { get; set; } = "default";
 }

@@ -15,6 +15,106 @@ namespace IRCd.Core.Config
             ApplyInternal(target, filePath, visited);
         }
 
+        /// <summary>
+        /// Scans a conf file (and its includes) for security { profile = ... }.
+        /// Returns the last profile value encountered in include-expansion order, or null if not specified.
+        /// </summary>
+        public static string? TryGetSecurityProfile(string filePath)
+        {
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return TryGetSecurityProfileInternal(filePath, visited);
+        }
+
+        private static string? TryGetSecurityProfileInternal(string filePath, HashSet<string> visited)
+        {
+            var fullPath = Path.GetFullPath(filePath);
+            if (!visited.Add(fullPath))
+            {
+                throw new InvalidOperationException($"Config include cycle detected: {fullPath}");
+            }
+
+            if (!File.Exists(fullPath))
+            {
+                throw new FileNotFoundException($"Config file not found: {fullPath}", fullPath);
+            }
+
+            var baseDir = Path.GetDirectoryName(fullPath) ?? Directory.GetCurrentDirectory();
+
+            var tokens = Tokenize(fullPath);
+            string? found = null;
+
+            for (var i = 0; i < tokens.Count; i++)
+            {
+                var t = tokens[i];
+                if (t.Kind != TokenKind.Ident)
+                {
+                    continue;
+                }
+
+                if (string.Equals(t.Text, "include", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (i + 1 < tokens.Count)
+                    {
+                        var includePath = tokens[i + 1].Text;
+                        i++;
+
+                        var p = Path.IsPathRooted(includePath)
+                            ? includePath
+                            : Path.Combine(baseDir, includePath);
+
+                        var nested = TryGetSecurityProfileInternal(p, visited);
+                        if (!string.IsNullOrWhiteSpace(nested))
+                        {
+                            found = nested;
+                        }
+                    }
+                    continue;
+                }
+
+                if (!string.Equals(t.Text, "security", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (i + 1 >= tokens.Count || tokens[i + 1].Kind != TokenKind.Punct || tokens[i + 1].Text != "{")
+                {
+                    continue;
+                }
+
+                i += 2;
+                while (i < tokens.Count)
+                {
+                    var inner = tokens[i];
+                    if (inner.Kind == TokenKind.Punct && inner.Text == "}")
+                    {
+                        break;
+                    }
+
+                    if (inner.Kind == TokenKind.Ident && string.Equals(inner.Text, "profile", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var j = i + 1;
+                        if (j < tokens.Count && tokens[j].Kind == TokenKind.Punct && tokens[j].Text == "=")
+                        {
+                            j++;
+                        }
+
+                        if (j < tokens.Count && tokens[j].Kind is TokenKind.Ident or TokenKind.String)
+                        {
+                            var v = tokens[j].Text;
+                            if (!string.IsNullOrWhiteSpace(v))
+                            {
+                                found = v;
+                            }
+                        }
+                    }
+
+                    i++;
+                }
+            }
+
+            return found;
+        }
+
         private static void ApplyInternal(IrcOptions target, string filePath, HashSet<string> visited)
         {
             var fullPath = Path.GetFullPath(filePath);
@@ -54,12 +154,17 @@ namespace IRCd.Core.Config
                 if (c == '#' || c == ';')
                 {
                     while (i < text.Length && text[i] != '\n')
+                    {
                         i++;
+                    }
+
                     continue;
                 }
 
                 if (char.IsWhiteSpace(c))
+                {
                     continue;
+                }
 
                 if (c is '{' or '}' or ';' or '=')
                 {
@@ -76,7 +181,9 @@ namespace IRCd.Core.Config
                     {
                         c = text[i];
                         if (c == quote)
+                        {
                             break;
+                        }
 
                         if (c == '\\' && i + 1 < text.Length)
                         {
@@ -106,9 +213,15 @@ namespace IRCd.Core.Config
                     {
                         c = text[i];
                         if (char.IsWhiteSpace(c) || c is '{' or '}' or ';' or '=')
+                        {
                             break;
+                        }
+
                         if (c == '#' || c == ';')
+                        {
                             break;
+                        }
+
                         i++;
                     }
                     var raw = text[start..i];
@@ -194,6 +307,15 @@ namespace IRCd.Core.Config
                         continue;
                     }
 
+                    if (TryConsumeIdent("opersecurity"))
+                    {
+                        ConsumePunct("{");
+                        ParseOperSecurityBlock();
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
                     if (TryConsumeIdent("kline"))
                     {
                         ConsumePunct("{");
@@ -248,10 +370,28 @@ namespace IRCd.Core.Config
                         continue;
                     }
 
+                    if (TryConsumeIdent("bans"))
+                    {
+                        ConsumePunct("{");
+                        ParseBansBlock();
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
                     if (TryConsumeIdent("connectionguard"))
                     {
                         ConsumePunct("{");
                         ParseConnectionGuardBlock();
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("connectionprecheck"))
+                    {
+                        ConsumePunct("{");
+                        ParseConnectionPrecheckBlock();
                         ConsumePunct("}");
                         ConsumeOptionalPunct(";");
                         continue;
@@ -270,6 +410,24 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("{");
                         ParsePingBlock();
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("observability"))
+                    {
+                        ConsumePunct("{");
+                        ParseObservabilityBlock();
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("audit"))
+                    {
+                        ConsumePunct("{");
+                        ParseAuditBlock();
                         ConsumePunct("}");
                         ConsumeOptionalPunct(";");
                         continue;
@@ -302,6 +460,15 @@ namespace IRCd.Core.Config
                         continue;
                     }
 
+                    if (TryConsumeIdent("security"))
+                    {
+                        ConsumePunct("{");
+                        ParseSecurityBlock();
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
                     if (TryConsumeIdent("flood"))
                     {
                         ConsumePunct("{");
@@ -311,10 +478,28 @@ namespace IRCd.Core.Config
                         continue;
                     }
 
+                    if (TryConsumeIdent("autodline"))
+                    {
+                        ConsumePunct("{");
+                        ParseAutoDlineBlock();
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
                     if (TryConsumeIdent("auth"))
                     {
                         ConsumePunct("{");
                         ParseAuthBlock();
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("sasl"))
+                    {
+                        ConsumePunct("{");
+                        ParseSaslBlock();
                         ConsumePunct("}");
                         ConsumeOptionalPunct(";");
                         continue;
@@ -400,6 +585,125 @@ namespace IRCd.Core.Config
                 }
             }
 
+            private void ParseAutoDlineBlock()
+            {
+                var whitelist = new List<string>();
+
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("enabled"))
+                    {
+                        ConsumePunct("=");
+                        _o.AutoDline.Enabled = ParseBoolValue(ParseValue());
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("windowSeconds"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.AutoDline.WindowSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("threshold"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.AutoDline.Threshold = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("baseDurationSeconds"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.AutoDline.BaseDurationSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("backoffFactor"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.AutoDline.BackoffFactor = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxDurationSeconds"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.AutoDline.MaxDurationSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("whitelist"))
+                    {
+                        ConsumePunct("=");
+                        var raw = ParseValue();
+                        foreach (var part in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                        {
+                            if (!string.IsNullOrWhiteSpace(part))
+                            {
+                                whitelist.Add(part);
+                            }
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    var _ = ParseIdent();
+                    if (IsPunct("="))
+                    {
+                        ConsumePunct("=");
+                        _ = ParseValue();
+                    }
+
+                    ConsumeOptionalPunct(";");
+                }
+
+                if (whitelist.Count > 0)
+                {
+                    _o.AutoDline.WhitelistCidrs = whitelist.ToArray();
+                }
+            }
+
+            private static bool ParseBoolValue(string v)
+            {
+                if (string.IsNullOrWhiteSpace(v))
+                {
+                    return false;
+                }
+
+                return v.Equals("true", StringComparison.OrdinalIgnoreCase)
+                    || v.Equals("yes", StringComparison.OrdinalIgnoreCase)
+                    || v.Equals("on", StringComparison.OrdinalIgnoreCase)
+                    || v == "1";
+            }
+
             private void ParseListenBlock()
             {
                 var bindIp = _o.Listen.BindIp;
@@ -425,6 +729,7 @@ namespace IRCd.Core.Config
                             _o.Listen.ClientPort = p;
                             clientPort = p;
                         }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -437,6 +742,7 @@ namespace IRCd.Core.Config
                             _o.Listen.TlsClientPort = p;
                             tlsPort = p;
                         }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -486,7 +792,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Listen.AutoGeneratedCertDaysValid = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -517,11 +826,23 @@ namespace IRCd.Core.Config
                         continue;
                     }
 
+                    if (TryConsumeIdent("requestclientcertificate"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        _o.Listen.RequestClientCertificate = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
                     if (TryConsumeIdent("serverport"))
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var p))
+                        {
                             _o.Listen.ServerPort = p;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -580,7 +901,9 @@ namespace IRCd.Core.Config
                 }
 
                 if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(cert.Path))
+                {
                     return;
+                }
 
                 _o.Listen.TlsCertificates ??= new Dictionary<string, TlsCertificateOptions>(StringComparer.OrdinalIgnoreCase);
                 _o.Listen.TlsCertificates[name!] = cert;
@@ -590,16 +913,125 @@ namespace IRCd.Core.Config
             {
                 while (!Eof && !IsPunct("}"))
                 {
-                    if (TryConsumeIdent("maxisonnames")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.Limits.MaxIsonNames = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("maxwhomasklength")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.Limits.MaxWhoMaskLength = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("maxwhoistargets")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.Limits.MaxWhoisTargets = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("maxuserhosttargets")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.Limits.MaxUserhostTargets = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("maxnameschannels")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.Limits.MaxNamesChannels = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("maxlisttargets")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.Limits.MaxListTargets = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("maxprivmsgtargets")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.Limits.MaxPrivmsgTargets = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("maxnoticetargets")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.Limits.MaxNoticeTargets = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("maxsilenceentries")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.Limits.MaxSilenceEntries = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("maxwatchentries")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.Limits.MaxWatchEntries = v; ConsumeOptionalPunct(";"); continue; }
+                    if (TryConsumeIdent("maxisonnames"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Limits.MaxIsonNames = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxwhomasklength"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Limits.MaxWhoMaskLength = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxwhoistargets"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Limits.MaxWhoisTargets = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxuserhosttargets"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Limits.MaxUserhostTargets = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxnameschannels"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Limits.MaxNamesChannels = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxlisttargets"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Limits.MaxListTargets = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxprivmsgtargets"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Limits.MaxPrivmsgTargets = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxnoticetargets"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Limits.MaxNoticeTargets = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxsilenceentries"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Limits.MaxSilenceEntries = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxwatchentries"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Limits.MaxWatchEntries = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
 
                     ConsumeUnknownStatement();
                 }
@@ -609,13 +1041,293 @@ namespace IRCd.Core.Config
             {
                 while (!Eof && !IsPunct("}"))
                 {
-                    if (TryConsumeIdent("enabled")) { ConsumePunct("="); var v = ParseValue(); _o.ConnectionGuard.Enabled = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1"; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("maxconnectionsperwindowperip")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.ConnectionGuard.MaxConnectionsPerWindowPerIp = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("windowseconds")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.ConnectionGuard.WindowSeconds = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("maxactiveconnectionsperip")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.ConnectionGuard.MaxActiveConnectionsPerIp = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("maxunregisteredperip")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.ConnectionGuard.MaxUnregisteredPerIp = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("registrationtimeoutseconds")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) _o.ConnectionGuard.RegistrationTimeoutSeconds = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("rejectmessage")) { ConsumePunct("="); _o.ConnectionGuard.RejectMessage = ParseValue(); ConsumeOptionalPunct(";"); continue; }
+                    if (TryConsumeIdent("enabled"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        _o.ConnectionGuard.Enabled = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxconnectionsperwindowperip"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionGuard.MaxConnectionsPerWindowPerIp = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxconnectionsperwindowperiptls"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionGuard.MaxConnectionsPerWindowPerIpTls = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxtlshandshakesperwindowperip"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionGuard.MaxTlsHandshakesPerWindowPerIp = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("windowseconds"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionGuard.WindowSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxactiveconnectionsperip"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionGuard.MaxActiveConnectionsPerIp = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("globalmaxactiveconnections"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionGuard.GlobalMaxActiveConnections = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxunregisteredperip"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionGuard.MaxUnregisteredPerIp = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("registrationtimeoutseconds"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionGuard.RegistrationTimeoutSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("tlshandshaketimeoutseconds"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                            _o.ConnectionGuard.TlsHandshakeTimeoutSeconds = v;
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("rejectmessage"))
+                    {
+                        ConsumePunct("=");
+                        _o.ConnectionGuard.RejectMessage = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+            }
+
+            private void ParseConnectionPrecheckBlock()
+            {
+                var dnsbl = new List<DnsblZoneOptions>();
+                var tor = new List<DnsblZoneOptions>();
+                var vpn = new List<DnsblZoneOptions>();
+
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("enabled"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        _o.ConnectionPrecheck.Enabled = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("timeoutms"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionPrecheck.TimeoutMs = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("cacheallowttlseconds"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionPrecheck.CacheAllowTtlSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("cacheblockttlseconds"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionPrecheck.CacheBlockTtlSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("cachemaxentries"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionPrecheck.CacheMaxEntries = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("skipnonpublicips"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        _o.ConnectionPrecheck.SkipNonPublicIps = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("dnsbl"))
+                    {
+                        ConsumePunct("{");
+                        dnsbl.Add(ParseConnectionPrecheckZoneBlock());
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("tor_dnsbl"))
+                    {
+                        ConsumePunct("{");
+                        tor.Add(ParseConnectionPrecheckZoneBlock());
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("vpn_dnsbl"))
+                    {
+                        ConsumePunct("{");
+                        vpn.Add(ParseConnectionPrecheckZoneBlock());
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+
+                _o.ConnectionPrecheck.Dnsbl = dnsbl.ToArray();
+                _o.ConnectionPrecheck.TorDnsbl = tor.ToArray();
+                _o.ConnectionPrecheck.VpnDnsbl = vpn.ToArray();
+            }
+
+            private DnsblZoneOptions ParseConnectionPrecheckZoneBlock()
+            {
+                var z = new DnsblZoneOptions();
+
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("zone"))
+                    {
+                        ConsumePunct("=");
+                        z.Zone = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("reason"))
+                    {
+                        ConsumePunct("=");
+                        z.Reason = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("tempdlineseconds"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                            z.TempDlineSeconds = v;
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+
+                return z;
+            }
+
+            private void ParseBansBlock()
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("enforcement_check_interval"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Bans.EnforcementCheckIntervalSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
 
                     ConsumeUnknownStatement();
                 }
@@ -678,9 +1390,42 @@ namespace IRCd.Core.Config
             {
                 while (!Eof && !IsPunct("}"))
                 {
-                    if (TryConsumeIdent("capacity")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) target.Capacity = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("refilltokens")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) target.RefillTokens = v; ConsumeOptionalPunct(";"); continue; }
-                    if (TryConsumeIdent("refillperiod")) { ConsumePunct("="); if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)) target.RefillPeriodSeconds = v; ConsumeOptionalPunct(";"); continue; }
+                    if (TryConsumeIdent("capacity"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            target.Capacity = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("refilltokens"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            target.RefillTokens = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("refillperiod"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            target.RefillPeriodSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
                     ConsumeUnknownStatement();
                 }
             }
@@ -812,6 +1557,22 @@ namespace IRCd.Core.Config
                     var list = new List<OperOptions>(_o.Opers);
                     list.Add(oper);
                     _o.Opers = list.ToArray();
+                }
+            }
+
+            private void ParseOperSecurityBlock()
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("require_hashed_passwords"))
+                    {
+                        ConsumePunct("=");
+                        _o.OperSecurity.RequireHashedPasswords = ParseBoolValue(ParseValue());
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
                 }
             }
 
@@ -972,9 +1733,15 @@ namespace IRCd.Core.Config
                 if (string.IsNullOrWhiteSpace(vhost))
                 {
                     if (!string.IsNullOrWhiteSpace(motd.FilePath))
+                    {
                         _o.Motd.FilePath = motd.FilePath;
+                    }
+
                     if (motd.Lines is { Length: > 0 })
+                    {
                         _o.Motd.Lines = motd.Lines;
+                    }
+
                     return;
                 }
 
@@ -991,7 +1758,7 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         var v = ParseValue();
-                        _o.Ping.Enabled = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        _o.Ping.Enabled = ParseBoolValue(v);
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1000,7 +1767,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var s))
+                        {
                             _o.Ping.IdleSecondsBeforePing = s;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1009,7 +1779,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var s))
+                        {
                             _o.Ping.DisconnectSecondsAfterPing = s;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1026,10 +1799,79 @@ namespace IRCd.Core.Config
                 }
             }
 
+            private void ParseObservabilityBlock()
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("enabled"))
+                    {
+                        ConsumePunct("=");
+                        _o.Observability.Enabled = ParseBoolValue(ParseValue());
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("bind"))
+                    {
+                        ConsumePunct("=");
+                        _o.Observability.BindIp = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("port"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var p) && p > 0 && p <= 65535)
+                        {
+                            _o.Observability.Port = p;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+            }
+
+            private void ParseAuditBlock()
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("enabled"))
+                    {
+                        ConsumePunct("=");
+                        _o.Audit.Enabled = ParseBoolValue(ParseValue());
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("file"))
+                    {
+                        ConsumePunct("=");
+                        _o.Audit.FilePath = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+            }
+
             private void ParseServicesBlock()
             {
                 while (!Eof && !IsPunct("}"))
                 {
+                    if (TryConsumeIdent("persistence"))
+                    {
+                        ConsumePunct("{");
+                        ParseServicesPersistenceBlock();
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
                     if (TryConsumeIdent("nickserv"))
                     {
                         ConsumePunct("{");
@@ -1070,6 +1912,177 @@ namespace IRCd.Core.Config
                 }
             }
 
+            private void ParseServicesPersistenceBlock()
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("saveintervalseconds"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Services.Persistence.SaveIntervalSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("backupcount"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Services.Persistence.BackupCount = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("recovertmponstartup"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        _o.Services.Persistence.RecoverTmpOnStartup = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("locktimeoutms"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Services.Persistence.LockTimeoutMs = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+            }
+
+            private void ParseSaslBlock()
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("external"))
+                    {
+                        ConsumePunct("{");
+                        ParseSaslExternalBlock(_o.Sasl.External);
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+            }
+
+            private void ParseSaslExternalBlock(SaslExternalOptions target)
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("enabled"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        target.Enabled = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("fingerprints"))
+                    {
+                        ConsumePunct("{");
+                        ParseSaslMappingBlock(target.FingerprintToAccount, normalizeFingerprint: true);
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("subjects"))
+                    {
+                        ConsumePunct("{");
+                        ParseSaslMappingBlock(target.SubjectToAccount, normalizeFingerprint: false);
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+            }
+
+            private void ParseSaslMappingBlock(Dictionary<string, string> target, bool normalizeFingerprint)
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    var key = ParseValue();
+                    ConsumePunct("=");
+                    var value = ParseValue();
+                    ConsumeOptionalPunct(";");
+
+                    if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(value))
+                    {
+                        continue;
+                    }
+
+                    if (normalizeFingerprint)
+                    {
+                        key = NormalizeHexFingerprint(key);
+                        if (string.IsNullOrWhiteSpace(key))
+                        {
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        key = key.Trim();
+                    }
+
+                    target[key] = value;
+                }
+            }
+
+            private static string NormalizeHexFingerprint(string input)
+            {
+                if (string.IsNullOrWhiteSpace(input))
+                {
+                    return string.Empty;
+                }
+
+                Span<char> buf = stackalloc char[input.Length];
+                var n = 0;
+
+                foreach (var ch in input)
+                {
+                    var c = ch;
+                    if (c is >= '0' and <= '9')
+                    {
+                        buf[n++] = c;
+                        continue;
+                    }
+
+                    if (c is >= 'a' and <= 'f')
+                    {
+                        buf[n++] = (char)(c - 32);
+                        continue;
+                    }
+
+                    if (c is >= 'A' and <= 'F')
+                    {
+                        buf[n++] = c;
+                        continue;
+                    }
+                }
+
+                return n == 0 ? string.Empty : new string(buf[..n]);
+            }
+
             private void ParseNickServBlock()
             {
                 while (!Eof && !IsPunct("}"))
@@ -1095,7 +2108,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var s))
+                        {
                             _o.Services.NickServ.EnforceDelaySeconds = s;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1113,7 +2129,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var h))
+                        {
                             _o.Services.NickServ.PendingRegistrationExpiryHours = h;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1122,7 +2141,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var d))
+                        {
                             _o.Services.NickServ.AccountExpiryDays = d;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1139,7 +2161,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var p))
+                        {
                             _o.Services.NickServ.Smtp.Port = p;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1294,7 +2319,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Isupport.NickLen = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1303,7 +2331,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Isupport.ChanLen = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1312,7 +2343,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Isupport.TopicLen = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1321,7 +2355,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Isupport.MaxModes = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1330,7 +2367,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Isupport.AwayLen = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1347,7 +2387,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Isupport.KickLen = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1360,6 +2403,18 @@ namespace IRCd.Core.Config
             {
                 while (!Eof && !IsPunct("}"))
                 {
+                    if (TryConsumeIdent("client_max_line_chars"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.Transport.ClientMaxLineChars = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
                     if (TryConsumeIdent("tcp"))
                     {
                         ConsumePunct("{");
@@ -1391,6 +2446,22 @@ namespace IRCd.Core.Config
                 }
             }
 
+            private void ParseSecurityBlock()
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("profile"))
+                    {
+                        ConsumePunct("=");
+                        _o.Security.Profile = ParseValue();
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+            }
+
             private void ParseTransportTcpBlock()
             {
                 while (!Eof && !IsPunct("}"))
@@ -1408,7 +2479,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Transport.Tcp.KeepAliveTimeMs = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1417,7 +2491,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Transport.Tcp.KeepAliveIntervalMs = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1434,7 +2511,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Transport.S2S.InboundHandshakeTimeoutSeconds = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1443,7 +2523,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Transport.S2S.OutboundScanIntervalSeconds = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1452,7 +2535,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Transport.S2S.MsgIdCacheTtlSeconds = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1461,7 +2547,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Transport.S2S.MsgIdCacheMaxEntries = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1470,7 +2559,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Transport.S2S.OutboundBackoffMaxSeconds = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1479,7 +2571,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Transport.S2S.OutboundBackoffMaxExponent = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1488,7 +2583,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Transport.S2S.OutboundFailureLimit = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1505,7 +2603,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Transport.Queues.ClientSendQueueCapacity = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1514,7 +2615,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Transport.Queues.ServerLinkSendQueueCapacity = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1531,6 +2635,15 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("{");
                         ParseFloodGateBlock(_o.Flood.Client);
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("commands"))
+                    {
+                        ConsumePunct("{");
+                        ParseFloodCommandsBlock(_o.Flood.Commands);
                         ConsumePunct("}");
                         ConsumeOptionalPunct(";");
                         continue;
@@ -1558,15 +2671,167 @@ namespace IRCd.Core.Config
                 }
             }
 
-            private void ParseFloodGateBlock(FloodGateOptions target)
+            private void ParseFloodCommandsBlock(CommandFloodOptions target)
             {
                 while (!Eof && !IsPunct("}"))
                 {
-                    if (TryConsumeIdent("maxlines"))
+                    if (TryConsumeIdent("enabled"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        target.Enabled = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("violations_before_disconnect"))
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
-                            target.MaxLines = v;
+                        {
+                            target.ViolationsBeforeDisconnect = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("warning_cooldown"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            target.WarningCooldownSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("violation_reset_seconds"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            target.ViolationResetSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("exempt_opers"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        target.ExemptOpers = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("oper_multiplier"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            target.OperMultiplier = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("temp_dline_enabled"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        target.TempDlineEnabled = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("temp_dline_minutes"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            target.TempDlineMinutes = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("messages"))
+                    {
+                        ConsumePunct("{");
+                        ParseFloodBucketBlock(target.Messages);
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("joinpart"))
+                    {
+                        ConsumePunct("{");
+                        ParseFloodBucketBlock(target.JoinPart);
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("whowhois"))
+                    {
+                        ConsumePunct("{");
+                        ParseFloodBucketBlock(target.WhoWhois);
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("mode"))
+                    {
+                        ConsumePunct("{");
+                        ParseFloodBucketBlock(target.Mode);
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("nick"))
+                    {
+                        ConsumePunct("{");
+                        ParseFloodBucketBlock(target.Nick);
+                        ConsumePunct("}");
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+            }
+
+            private void ParseFloodBucketBlock(CommandFloodBucketOptions target)
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("enabled"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        target.Enabled = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("maxevents"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            target.MaxEvents = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1575,7 +2840,51 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             target.WindowSeconds = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("per_target"))
+                    {
+                        ConsumePunct("=");
+                        var v = ParseValue();
+                        target.PerTarget = string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    ConsumeUnknownStatement();
+                }
+            }
+
+            private void ParseFloodGateBlock(FloodGateOptions target)
+            {
+                while (!Eof && !IsPunct("}"))
+                {
+                    if (TryConsumeIdent("maxlines"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            target.MaxLines = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("window"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            target.WindowSeconds = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1610,7 +2919,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Auth.ReverseDnsTimeoutSeconds = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1637,7 +2949,10 @@ namespace IRCd.Core.Config
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
                             _o.Auth.AuthNoticeDelayMs = v;
+                        }
+
                         ConsumeOptionalPunct(";");
                         continue;
                     }
@@ -1657,7 +2972,9 @@ namespace IRCd.Core.Config
                     }
 
                     if (IsPunct("}"))
+                    {
                         return;
+                    }
 
                     _i++;
                 }
@@ -1675,6 +2992,7 @@ namespace IRCd.Core.Config
                     {
                         ApplyInternal(_o, f, _visited);
                     }
+
                     return;
                 }
 
@@ -1682,13 +3000,16 @@ namespace IRCd.Core.Config
                 {
                     var dir = Path.GetDirectoryName(inc);
                     if (string.IsNullOrWhiteSpace(dir))
+                    {
                         dir = _baseDir;
+                    }
 
                     var pattern = Path.GetFileName(inc);
                     foreach (var f in Directory.EnumerateFiles(dir, pattern, SearchOption.TopDirectoryOnly).Order(StringComparer.OrdinalIgnoreCase))
                     {
                         ApplyInternal(_o, f, _visited);
                     }
+
                     return;
                 }
 
@@ -1698,11 +3019,16 @@ namespace IRCd.Core.Config
             private string ParseIdent()
             {
                 if (Eof)
+                {
                     throw new InvalidOperationException("Unexpected end of config");
+                }
 
                 var t = _t[_i];
                 if (t.Kind is not TokenKind.Ident)
+                {
                     throw new InvalidOperationException($"Expected identifier, got '{t.Text}'");
+                }
+
                 _i++;
                 return t.Text;
             }
@@ -1710,49 +3036,68 @@ namespace IRCd.Core.Config
             private string ParseValue()
             {
                 if (Eof)
+                {
                     throw new InvalidOperationException("Unexpected end of config");
+                }
+
                 var t = _t[_i];
                 if (t.Kind is TokenKind.String or TokenKind.Ident)
                 {
                     _i++;
                     return t.Text;
                 }
+
                 throw new InvalidOperationException($"Expected value, got '{t.Text}'");
             }
 
             private void ConsumePunct(string punct)
             {
                 if (Eof)
+                {
                     throw new InvalidOperationException($"Expected '{punct}' but reached end of config");
+                }
+
                 var t = _t[_i];
                 if (t.Kind != TokenKind.Punct || t.Text != punct)
+                {
                     throw new InvalidOperationException($"Expected '{punct}', got '{t.Text}'");
+                }
+
                 _i++;
             }
 
             private void ConsumeOptionalPunct(string punct)
             {
                 if (!Eof && _t[_i].Kind == TokenKind.Punct && _t[_i].Text == punct)
+                {
                     _i++;
+                }
             }
 
             private bool TryConsumeIdent(string ident)
             {
                 if (Eof)
+                {
                     return false;
+                }
+
                 var t = _t[_i];
                 if (t.Kind == TokenKind.Ident && string.Equals(t.Text, ident, StringComparison.OrdinalIgnoreCase))
                 {
                     _i++;
                     return true;
                 }
+
                 return false;
             }
 
             private bool IsPunct(string punct)
             {
                 if (Eof)
+                {
                     return false;
+                }
+
                 var t = _t[_i];
                 return t.Kind == TokenKind.Punct && t.Text == punct;
             }
@@ -1767,7 +3112,10 @@ namespace IRCd.Core.Config
                 case "server.port":
                 case "irc.port":
                     if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var port))
+                    {
                         target.IrcPort = port;
+                    }
+
                     return;
 
                 default:

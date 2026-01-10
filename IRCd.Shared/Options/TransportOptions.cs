@@ -2,6 +2,8 @@ namespace IRCd.Shared.Options;
 
 public sealed class TransportOptions
 {
+    public int ClientMaxLineChars { get; set; } = 510;
+
     public TcpTransportOptions Tcp { get; set; } = new();
 
     public S2STransportOptions S2S { get; set; } = new();

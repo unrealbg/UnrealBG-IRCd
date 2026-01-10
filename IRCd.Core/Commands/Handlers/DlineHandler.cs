@@ -1,7 +1,9 @@
 namespace IRCd.Core.Commands.Handlers
 {
     using System;
+    using System.Collections.Generic;
     using System.Linq;
+    using System.Net;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -20,12 +22,14 @@ namespace IRCd.Core.Commands.Handlers
         private readonly IOptions<IrcOptions> _options;
         private readonly BanService _banService;
         private readonly IBanEnforcer _enforcement;
+        private readonly IAuditLogService _audit;
 
-        public DlineHandler(IOptions<IrcOptions> options, BanService banService, IBanEnforcer enforcement)
+        public DlineHandler(IOptions<IrcOptions> options, BanService banService, IBanEnforcer enforcement, IAuditLogService? audit = null)
         {
             _options = options;
             _banService = banService;
             _enforcement = enforcement;
+            _audit = audit ?? NullAuditLogService.Instance;
         }
 
         public async ValueTask HandleAsync(IClientSession session, Protocol.IrcMessage msg, ServerState state, CancellationToken ct)
@@ -45,6 +49,8 @@ namespace IRCd.Core.Commands.Handlers
                 return;
             }
 
+            var sourceIp = user.RemoteIp ?? (session.RemoteEndPoint as IPEndPoint)?.Address.ToString();
+
             if (msg.Params.Count < 1)
             {
                 await session.SendAsync($":{serverName} 461 {me} DLINE :Not enough parameters", ct);
@@ -58,6 +64,17 @@ namespace IRCd.Core.Commands.Handlers
                 var toRemove = rawMask.TrimStart('-').Trim();
                 var removed = await _banService.RemoveAsync(BanType.DLINE, toRemove, ct);
                 await session.SendAsync($":{serverName} NOTICE {me} :UNDLINE {(removed ? "removed" : "not found")} {toRemove}", ct);
+
+                await _audit.LogOperActionAsync(
+                    action: "UNDLINE",
+                    session: session,
+                    actorUid: user.Uid,
+                    actorNick: user.Nick ?? me,
+                    sourceIp: sourceIp,
+                    target: toRemove,
+                    reason: null,
+                    extra: new Dictionary<string, object?> { ["banType"] = "DLINE", ["removed"] = removed },
+                    ct: ct);
                 return;
             }
 
@@ -92,6 +109,17 @@ namespace IRCd.Core.Commands.Handlers
 
                     var expireText = expiresAt.HasValue ? $"expires {expiresAt.Value:yyyy-MM-dd HH:mm:ss} UTC" : "permanent";
                     await session.SendAsync($":{serverName} NOTICE {me} :DLINE added {mask} ({expireText}) :{reason}", ct);
+
+                    await _audit.LogOperActionAsync(
+                        action: "DLINE",
+                        session: session,
+                        actorUid: user.Uid,
+                        actorNick: user.Nick ?? me,
+                        sourceIp: sourceIp,
+                        target: mask,
+                        reason: reason,
+                        extra: new Dictionary<string, object?> { ["banType"] = "DLINE", ["expiresAtUtc"] = expiresAt },
+                        ct: ct);
                     return;
                 }
             }
@@ -117,6 +145,17 @@ namespace IRCd.Core.Commands.Handlers
             await _enforcement.EnforceBanImmediatelyAsync(permanentBan, ct);
 
             await session.SendAsync($":{serverName} NOTICE {me} :DLINE added {mask} (permanent) :{banReason}", ct);
+
+            await _audit.LogOperActionAsync(
+                action: "DLINE",
+                session: session,
+                actorUid: user.Uid,
+                actorNick: user.Nick ?? me,
+                sourceIp: sourceIp,
+                target: mask,
+                reason: banReason,
+                extra: new Dictionary<string, object?> { ["banType"] = "DLINE", ["expiresAtUtc"] = null },
+                ct: ct);
         }
     }
 }

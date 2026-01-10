@@ -13,6 +13,11 @@ namespace IRCd.Core.Services
         private long _commandsTotal;
         private long _floodKicksTotal;
 
+        private long _outboundQueueDepth;
+        private long _outboundQueueMaxDepth;
+        private long _outboundQueueDroppedTotal;
+        private long _outboundQueueOverflowDisconnectsTotal;
+
         private readonly object _rateLock = new();
         private readonly long[] _cmdBuckets = new long[10];
         private readonly long[] _cmdBucketSeconds = new long[10];
@@ -67,6 +72,30 @@ namespace IRCd.Core.Services
             Interlocked.Increment(ref _floodKicksTotal);
         }
 
+        public void OutboundQueueDepth(long depth)
+        {
+            Interlocked.Exchange(ref _outboundQueueDepth, depth);
+
+            long initial;
+            while ((initial = Interlocked.Read(ref _outboundQueueMaxDepth)) < depth)
+            {
+                if (Interlocked.CompareExchange(ref _outboundQueueMaxDepth, depth, initial) == initial)
+                {
+                    break;
+                }
+            }
+        }
+
+        public void OutboundQueueDrop()
+        {
+            Interlocked.Increment(ref _outboundQueueDroppedTotal);
+        }
+
+        public void OutboundQueueOverflowDisconnect()
+        {
+            Interlocked.Increment(ref _outboundQueueOverflowDisconnectsTotal);
+        }
+
         public MetricsSnapshot GetSnapshot()
         {
             double cps;
@@ -82,10 +111,14 @@ namespace IRCd.Core.Services
                 {
                     var sec = _cmdBucketSeconds[i];
                     if (sec == 0)
+                    {
                         continue;
+                    }
 
                     if (now - sec > _cmdBuckets.Length)
+                    {
                         continue;
+                    }
 
                     sum += _cmdBuckets[i];
                     seconds++;
@@ -105,7 +138,11 @@ namespace IRCd.Core.Services
                 ChannelsCreatedTotal: Interlocked.Read(ref _channelsCreatedTotal),
                 CommandsTotal: Interlocked.Read(ref _commandsTotal),
                 CommandsPerSecond: cps,
-                FloodKicksTotal: Interlocked.Read(ref _floodKicksTotal));
+                FloodKicksTotal: Interlocked.Read(ref _floodKicksTotal),
+                OutboundQueueDepth: Interlocked.Read(ref _outboundQueueDepth),
+                OutboundQueueMaxDepth: Interlocked.Read(ref _outboundQueueMaxDepth),
+                OutboundQueueDroppedTotal: Interlocked.Read(ref _outboundQueueDroppedTotal),
+                OutboundQueueOverflowDisconnectsTotal: Interlocked.Read(ref _outboundQueueOverflowDisconnectsTotal));
         }
     }
 }

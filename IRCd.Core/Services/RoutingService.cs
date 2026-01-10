@@ -17,12 +17,14 @@
             _formatter = formatter;
         }
 
-        public async ValueTask BroadcastToChannelAsync(
+        public ValueTask BroadcastToChannelAsync(
             Channel channel,
             string line,
             string? excludeConnectionId,
             CancellationToken ct)
         {
+            ct.ThrowIfCancellationRequested();
+
             foreach (var member in channel.Members)
             {
                 if (member.ConnectionId == excludeConnectionId)
@@ -30,22 +32,30 @@
                     continue;
                 }
 
+                ct.ThrowIfCancellationRequested();
+
                 if (_sessions.TryGet(member.ConnectionId, out var session) && session is not null)
                 {
-                    await session.SendAsync(_formatter.FormatFor(session, line), ct);
+                    session.SendAsync(_formatter.FormatFor(session, line), ct);
                 }
             }
+
+            return ValueTask.CompletedTask;
         }
 
-        public async ValueTask SendToUserAsync(
+        public ValueTask SendToUserAsync(
             string connectionId,
             string line,
             CancellationToken ct)
         {
+            ct.ThrowIfCancellationRequested();
+
             if (_sessions.TryGet(connectionId, out var session) && session is not null)
             {
-                await session.SendAsync(_formatter.FormatFor(session, line), ct);
+                session.SendAsync(_formatter.FormatFor(session, line), ct);
             }
+
+            return ValueTask.CompletedTask;
         }
     }
 }

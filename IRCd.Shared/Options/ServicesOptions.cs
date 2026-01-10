@@ -2,6 +2,8 @@ namespace IRCd.Shared.Options
 {
     public sealed class ServicesOptions
     {
+        public ServicesPersistenceOptions Persistence { get; set; } = new();
+
         public NickServOptions NickServ { get; set; } = new();
 
         public ChanServOptions ChanServ { get; set; } = new();

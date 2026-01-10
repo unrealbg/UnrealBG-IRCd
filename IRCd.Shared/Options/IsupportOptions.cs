@@ -8,7 +8,7 @@ namespace IRCd.Shared.Options
 
         public string ChanTypes { get; set; } = "#";
 
-        public string ChanModes { get; set; } = "b,k,l,imnpst";
+        public string ChanModes { get; set; } = "beI,k,l,imnpst";
 
         public string CaseMapping { get; set; } = "rfc1459";
 

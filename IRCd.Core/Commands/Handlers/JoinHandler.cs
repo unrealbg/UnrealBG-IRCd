@@ -22,8 +22,18 @@
         private readonly IMetrics _metrics;
         private readonly IServiceChannelEvents? _channelEvents;
         private readonly ISessionRegistry _sessions;
+        private readonly IAuthState? _auth;
+        private readonly BanMatcher _banMatcher;
 
-        public JoinHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask, IMetrics metrics, ISessionRegistry sessions, IServiceChannelEvents? channelEvents = null)
+        public JoinHandler(
+            RoutingService routing,
+            ServerLinkService links,
+            HostmaskService hostmask,
+            IMetrics metrics,
+            ISessionRegistry sessions,
+            IServiceChannelEvents? channelEvents = null,
+            IAuthState? auth = null,
+            BanMatcher? banMatcher = null)
         {
             _routing = routing;
             _links = links;
@@ -31,6 +41,8 @@
             _metrics = metrics;
             _sessions = sessions;
             _channelEvents = channelEvents;
+            _auth = auth;
+            _banMatcher = banMatcher ?? BanMatcher.Shared;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -99,12 +111,18 @@
             {
                 var maskUserName = session.UserName ?? "u";
                 var host = state.GetHostFor(session.ConnectionId);
-                var maskValue = $"{nick}!{maskUserName}@{host}";
+                var accountName = "*";
+                if (_auth is not null)
+                {
+                    accountName = await _auth.GetIdentifiedAccountAsync(session.ConnectionId, ct) ?? "*";
+                }
+
+                var matchInput = new ChannelBanMatchInput(nick, maskUserName, host, accountName);
 
                 var isBanned = false;
                 foreach (var ban in existing.Bans)
                 {
-                    if (MaskMatcher.IsMatch(ban.Mask, maskValue))
+                    if (_banMatcher.IsChannelBanMatch(ban.Mask, matchInput))
                     {
                         isBanned = true;
                         break;
@@ -116,7 +134,7 @@
                     var hasException = false;
                     foreach (var except in existing.ExceptBans)
                     {
-                        if (MaskMatcher.IsMatch(except.Mask, maskValue))
+                        if (_banMatcher.IsChannelExceptionMatch(except.Mask, matchInput))
                         {
                             hasException = true;
                             break;
@@ -145,7 +163,8 @@
                     {
                         foreach (var inviteExcept in existing.InviteExceptions)
                         {
-                            if (MaskMatcher.IsMatch(inviteExcept.Mask, maskValue))
+                            var maskValue = $"{nick}!{maskUserName}@{host}";
+                            if (_banMatcher.IsWildcardMatch(inviteExcept.Mask, maskValue))
                             {
                                 isInvited = true;
                                 break;
@@ -187,6 +206,11 @@
 
             var userName = session.UserName ?? "u";
             var host2 = state.GetHostFor(session.ConnectionId);
+            var joiningAccountName = "*";
+            if (_auth is not null)
+            {
+                joiningAccountName = await _auth.GetIdentifiedAccountAsync(session.ConnectionId, ct) ?? "*";
+            }
             
             foreach (var member in channel.Members)
             {
@@ -197,14 +221,13 @@
                 {
                     if (state.TryGetUser(session.ConnectionId, out var joiningUser) && joiningUser is not null)
                     {
-                        var accountName = "*"; // No account system yet
                         var realName = joiningUser.RealName ?? "Unknown";
-                        var extJoinLine = $":{nick}!{userName}@{host2} JOIN {channelName} {accountName} :{realName}";
+                        var extJoinLine = $":{nick}!{userName}@{host2} JOIN {channelName} {joiningAccountName} :{realName}";
                         await memberSession.SendAsync(extJoinLine, ct);
                     }
                     else
                     {
-                        var extJoinLine = $":{nick}!{userName}@{host2} JOIN {channelName} * :Unknown";
+                        var extJoinLine = $":{nick}!{userName}@{host2} JOIN {channelName} {joiningAccountName} :Unknown";
                         await memberSession.SendAsync(extJoinLine, ct);
                     }
                 }

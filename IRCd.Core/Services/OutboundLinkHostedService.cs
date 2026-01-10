@@ -24,6 +24,7 @@ namespace IRCd.Core.Services
         private readonly ServerLinkService _linkService;
 
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _failures = new(StringComparer.OrdinalIgnoreCase);
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task> _linkLoops = new(StringComparer.OrdinalIgnoreCase);
 
         public OutboundLinkHostedService(
             ILogger<OutboundLinkHostedService> logger,
@@ -46,15 +47,11 @@ namespace IRCd.Core.Services
                 foreach (var link in links)
                 {
                     if (stoppingToken.IsCancellationRequested)
-                        break;
-
-                    var delay = GetBackoffDelaySeconds(link);
-                    if (delay > 0)
                     {
-                        await Task.Delay(TimeSpan.FromSeconds(delay), stoppingToken);
+                        break;
                     }
 
-                    await TryConnectOnceAsync(link, stoppingToken);
+                    _linkLoops.TryAdd(link.Name, Task.Run(() => RunLinkLoopAsync(link, stoppingToken), stoppingToken));
                 }
 
                 var scanSeconds = _options.CurrentValue.Transport?.S2S?.OutboundScanIntervalSeconds ?? 10;
@@ -62,10 +59,28 @@ namespace IRCd.Core.Services
             }
         }
 
+        private async Task RunLinkLoopAsync(LinkOptions link, CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var delay = GetBackoffDelaySeconds(link);
+                if (delay > 0)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(delay), ct);
+                }
+
+                await TryConnectOnceAsync(link, ct);
+
+                await Task.Delay(TimeSpan.FromSeconds(1), ct);
+            }
+        }
+
         private int GetBackoffDelaySeconds(LinkOptions link)
         {
             if (!_failures.TryGetValue(link.Name, out var n) || n <= 0)
+            {
                 return 0;
+            }
 
             var s2s = _options.CurrentValue.Transport?.S2S;
             var maxSeconds = s2s?.OutboundBackoffMaxSeconds ?? 30;
@@ -159,12 +174,15 @@ namespace IRCd.Core.Services
             public ValueTask SendAsync(string line, CancellationToken ct = default)
             {
                 if (Volatile.Read(ref _closed) == 1)
+                {
                     return ValueTask.CompletedTask;
+                }
 
                 if (!_outgoing.Writer.TryWrite(line))
                 {
                     _ = CloseAsync("Send queue overflow", ct);
                 }
+
                 return ValueTask.CompletedTask;
             }
 
@@ -174,11 +192,15 @@ namespace IRCd.Core.Services
                 {
                     var line = await _reader.ReadLineAsync();
                     if (line is null)
+                    {
                         return null;
+                    }
 
                     const int maxChars = 510;
                     if (line.Length > maxChars)
+                    {
                         line = line[..maxChars];
+                    }
 
                     return line;
                 }
@@ -193,7 +215,9 @@ namespace IRCd.Core.Services
                     await foreach (var line in _outgoing.Reader.ReadAllAsync(ct))
                     {
                         if (Volatile.Read(ref _closed) == 1)
+                        {
                             break;
+                        }
 
                         await _writer.WriteLineAsync(line);
                     }
@@ -207,7 +231,9 @@ namespace IRCd.Core.Services
             public async Task CloseAsync(string reason, CancellationToken ct)
             {
                 if (Interlocked.Exchange(ref _closed, 1) == 1)
+                {
                     return;
+                }
 
                 try { _outgoing.Writer.TryComplete(); } catch { }
                 try { _client.Close(); } catch { }

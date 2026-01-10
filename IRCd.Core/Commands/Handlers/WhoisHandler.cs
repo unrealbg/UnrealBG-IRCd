@@ -23,12 +23,14 @@
         private readonly ISessionRegistry _sessions;
         private readonly IOptions<IrcOptions> _options;
         private readonly IServiceSessionEvents? _serviceEvents;
+        private readonly IServerClock? _clock;
 
-        public WhoisHandler(ISessionRegistry sessions, IOptions<IrcOptions> options, IServiceSessionEvents? serviceEvents = null)
+        public WhoisHandler(ISessionRegistry sessions, IOptions<IrcOptions> options, IServiceSessionEvents? serviceEvents = null, IServerClock? clock = null)
         {
             _sessions = sessions;
             _options = options;
             _serviceEvents = serviceEvents;
+            _clock = clock;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -168,7 +170,7 @@
                     await session.SendAsync($":{localServerName} 379 {me} {targetUser.Nick} :is using modes +{new string(modeLetters.ToArray())}", ct);
                 }
 
-                var now = DateTimeOffset.UtcNow;
+                var now = _clock?.UtcNow ?? DateTimeOffset.UtcNow;
 
                 var connectedAt = targetUser.ConnectedAtUtc;
                 if (connectedAt == default)
@@ -191,13 +193,19 @@
         private static bool IsNetAdmin(IrcOptions options, User user)
         {
             if (user is null)
+            {
                 return false;
+            }
 
             if (!user.Modes.HasFlag(UserModes.Operator))
+            {
                 return false;
+            }
 
             if (string.IsNullOrWhiteSpace(user.OperClass))
+            {
                 return false;
+            }
 
             var cls = options.Classes.FirstOrDefault(c =>
                 c is not null
@@ -205,7 +213,9 @@
                 && string.Equals(c.Name, user.OperClass, StringComparison.OrdinalIgnoreCase));
 
             if (cls?.Capabilities is null || cls.Capabilities.Length == 0)
+            {
                 return false;
+            }
 
             return cls.Capabilities.Any(c => string.Equals(c, "netadmin", StringComparison.OrdinalIgnoreCase));
         }
@@ -217,10 +227,14 @@
             foreach (var ch in state.GetAllChannels())
             {
                 if (!ch.Contains(targetConnId))
+                {
                     continue;
+                }
 
                 if (ch.Modes.HasFlag(ChannelModes.Secret) && !ch.Contains(requesterConnId))
+                {
                     continue;
+                }
 
                 var priv = ch.GetPrivilege(targetConnId);
                 var pfx = priv.ToPrefix();

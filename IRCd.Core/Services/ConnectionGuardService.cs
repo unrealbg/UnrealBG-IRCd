@@ -4,6 +4,7 @@
     using System.Collections.Concurrent;
     using System.Net;
 
+    using IRCd.Core.Abstractions;
     using IRCd.Shared.Options;
 
     using Microsoft.Extensions.Options;
@@ -12,20 +13,32 @@
     {
         private readonly IOptionsMonitor<IrcOptions> _options;
 
-        private readonly ConcurrentDictionary<IPAddress, SlidingWindowCounter> _connWindows = new();
+        private readonly IServerClock _clock;
+
+        private readonly ConcurrentDictionary<IPAddress, SlidingWindowCounter> _plainConnWindows = new();
+
+        private readonly ConcurrentDictionary<IPAddress, SlidingWindowCounter> _tlsConnWindows = new();
+
+        private readonly ConcurrentDictionary<IPAddress, SlidingWindowCounter> _tlsHandshakeWindows = new();
 
         private readonly ConcurrentDictionary<IPAddress, int> _unregisteredCounts = new();
 
         private readonly ConcurrentDictionary<IPAddress, int> _activeCounts = new();
 
-        public ConnectionGuardService(IOptionsMonitor<IrcOptions> options)
+        private int _globalActiveCount;
+
+        public ConnectionGuardService(IOptionsMonitor<IrcOptions> options, IServerClock clock)
         {
             _options = options;
+            _clock = clock;
         }
 
         public bool Enabled => _options.CurrentValue.ConnectionGuard.Enabled;
 
         public bool TryAcceptNewConnection(IPAddress ip, out string rejectReason)
+            => TryAcceptNewConnection(ip, secure: false, out rejectReason);
+
+        public bool TryAcceptNewConnection(IPAddress ip, bool secure, out string rejectReason)
         {
             rejectReason = string.Empty;
 
@@ -35,9 +48,20 @@
                 return true;
             }
 
-            var counter = _connWindows.GetOrAdd(ip, _ => new SlidingWindowCounter());
-            if (!counter.TryIncrement(cfg.WindowSeconds, cfg.MaxConnectionsPerWindowPerIp))
+            var maxPerIp = secure ? cfg.MaxConnectionsPerWindowPerIpTls : cfg.MaxConnectionsPerWindowPerIp;
+            var windows = secure ? _tlsConnWindows : _plainConnWindows;
+
+            var counter = windows.GetOrAdd(ip, _ => new SlidingWindowCounter(_clock));
+            if (!counter.TryIncrement(cfg.WindowSeconds, maxPerIp))
             {
+                rejectReason = cfg.RejectMessage;
+                return false;
+            }
+
+            var global = System.Threading.Interlocked.Increment(ref _globalActiveCount);
+            if (cfg.GlobalMaxActiveConnections > 0 && global > cfg.GlobalMaxActiveConnections)
+            {
+                DecrementNonNegative(ref _globalActiveCount);
                 rejectReason = cfg.RejectMessage;
                 return false;
             }
@@ -46,6 +70,7 @@
             if (active > cfg.MaxActiveConnectionsPerIp)
             {
                 _activeCounts.AddOrUpdate(ip, 0, (_, v) => Math.Max(0, v - 1));
+                DecrementNonNegative(ref _globalActiveCount);
                 rejectReason = cfg.RejectMessage;
                 return false;
             }
@@ -55,7 +80,28 @@
             {
                 _unregisteredCounts.AddOrUpdate(ip, 0, (_, v) => Math.Max(0, v - 1));
                 _activeCounts.AddOrUpdate(ip, 0, (_, v) => Math.Max(0, v - 1));
+                DecrementNonNegative(ref _globalActiveCount);
 
+                rejectReason = cfg.RejectMessage;
+                return false;
+            }
+
+            return true;
+        }
+
+        public bool TryStartTlsHandshake(IPAddress ip, out string rejectReason)
+        {
+            rejectReason = string.Empty;
+
+            var cfg = _options.CurrentValue.ConnectionGuard;
+            if (!cfg.Enabled)
+            {
+                return true;
+            }
+
+            var counter = _tlsHandshakeWindows.GetOrAdd(ip, _ => new SlidingWindowCounter(_clock));
+            if (!counter.TryIncrement(cfg.WindowSeconds, cfg.MaxTlsHandshakesPerWindowPerIp))
+            {
                 rejectReason = cfg.RejectMessage;
                 return false;
             }
@@ -68,9 +114,6 @@
         /// </summary>
         public void MarkRegistered(IPAddress ip)
         {
-            if (!Enabled)
-                return;
-
             _unregisteredCounts.AddOrUpdate(ip, 0, (_, v) => Math.Max(0, v - 1));
         }
 
@@ -79,10 +122,9 @@
         /// </summary>
         public void ReleaseActive(IPAddress ip)
         {
-            if (!Enabled)
-                return;
-
             _activeCounts.AddOrUpdate(ip, 0, (_, v) => Math.Max(0, v - 1));
+
+            DecrementNonNegative(ref _globalActiveCount);
         }
 
         /// <summary>
@@ -90,20 +132,44 @@
         /// </summary>
         public void ReleaseUnregistered(IPAddress ip)
         {
-            if (!Enabled)
-                return;
-
             _unregisteredCounts.AddOrUpdate(ip, 0, (_, v) => Math.Max(0, v - 1));
         }
 
         public int GetRegistrationTimeoutSeconds()
             => Math.Max(5, _options.CurrentValue.ConnectionGuard.RegistrationTimeoutSeconds);
 
+        public int GetTlsHandshakeTimeoutSeconds()
+            => Math.Max(1, _options.CurrentValue.ConnectionGuard.TlsHandshakeTimeoutSeconds);
+
+        private static void DecrementNonNegative(ref int value)
+        {
+            while (true)
+            {
+                var current = Volatile.Read(ref value);
+                if (current <= 0)
+                {
+                    return;
+                }
+
+                if (Interlocked.CompareExchange(ref value, current - 1, current) == current)
+                {
+                    return;
+                }
+            }
+        }
+
         private sealed class SlidingWindowCounter
         {
             private readonly object _lock = new();
-            private DateTimeOffset _windowStartUtc = DateTimeOffset.UtcNow;
+            private readonly IServerClock _clock;
+            private DateTimeOffset _windowStartUtc;
             private int _count;
+
+            public SlidingWindowCounter(IServerClock clock)
+            {
+                _clock = clock;
+                _windowStartUtc = clock.UtcNow;
+            }
 
             public bool TryIncrement(int windowSeconds, int maxCount)
             {
@@ -112,7 +178,7 @@
 
                 lock (_lock)
                 {
-                    var now = DateTimeOffset.UtcNow;
+                    var now = _clock.UtcNow;
                     var window = TimeSpan.FromSeconds(windowSeconds);
 
                     if (now - _windowStartUtc > window)

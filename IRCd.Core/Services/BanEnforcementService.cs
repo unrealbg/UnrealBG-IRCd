@@ -12,6 +12,7 @@ namespace IRCd.Core.Services
 
     using Microsoft.Extensions.Hosting;
     using Microsoft.Extensions.Logging;
+    using Microsoft.Extensions.Options;
 
     /// <summary>
     /// Background service for ban enforcement and cleanup
@@ -24,9 +25,10 @@ namespace IRCd.Core.Services
         private readonly RoutingService _routing;
         private readonly ILogger<BanEnforcementService> _logger;
 
-        private readonly TimeSpan _checkInterval = TimeSpan.FromMinutes(5);
+        private readonly TimeSpan _checkInterval;
 
         public BanEnforcementService(
+            IOptions<IRCd.Shared.Options.IrcOptions> options,
             BanService banService,
             ServerState state,
             ISessionRegistry sessions,
@@ -38,6 +40,10 @@ namespace IRCd.Core.Services
             _sessions = sessions;
             _routing = routing;
             _logger = logger;
+
+            var seconds = options?.Value?.Bans?.EnforcementCheckIntervalSeconds ?? 300;
+            seconds = Math.Max(1, seconds);
+            _checkInterval = TimeSpan.FromSeconds(seconds);
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -164,7 +170,9 @@ namespace IRCd.Core.Services
                 foreach (var member in members)
                 {
                     if (member.ConnectionId == user.ConnectionId)
+                    {
                         continue;
+                    }
 
                     if (_sessions.TryGet(member.ConnectionId, out var memberSession) && memberSession is not null)
                     {
