@@ -17,14 +17,24 @@
         private readonly Dictionary<string, IIrcCommandHandler> _handlers;
         private readonly RateLimitService _rateLimit;
         private readonly FloodService? _flood;
+        private readonly AutoDlineService? _autoDline;
         private readonly IMetrics _metrics;
+        private readonly IServerClock? _clock;
 
-        public CommandDispatcher(IEnumerable<IIrcCommandHandler> handlers, RateLimitService rateLimit, IMetrics metrics, FloodService? flood = null)
+        public CommandDispatcher(
+            IEnumerable<IIrcCommandHandler> handlers,
+            RateLimitService rateLimit,
+            IMetrics metrics,
+            FloodService? flood = null,
+            IServerClock? clock = null,
+            AutoDlineService? autoDline = null)
         {
             _handlers = handlers.ToDictionary(h => h.Command, StringComparer.OrdinalIgnoreCase);
             _rateLimit = rateLimit;
             _metrics = metrics;
             _flood = flood;
+            _clock = clock;
+            _autoDline = autoDline;
         }
 
         public async ValueTask DispatchAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -35,7 +45,7 @@
             {
                 if (UpdatesIdleForWhois(msg.Command))
                 {
-                    user.LastActivityUtc = DateTimeOffset.UtcNow;
+                    user.LastActivityUtc = _clock?.UtcNow ?? DateTimeOffset.UtcNow;
                 }
             }
 
@@ -47,6 +57,17 @@
 
                     if (!_rateLimit.TryConsume(session.ConnectionId, key, out var retryAfterSeconds))
                     {
+                        if (_autoDline is not null)
+                        {
+                            var applied = await _autoDline.ObserveRateLimitAsync(session, state, ct);
+                            if (applied)
+                            {
+                                try { await session.SendAsync("ERROR :D-Lined", ct); } catch { }
+                                await session.CloseAsync("D-Lined", ct);
+                                return;
+                            }
+                        }
+
                         var nick = session.Nick ?? "*";
                         await session.SendAsync($":server NOTICE {nick} :Flood detected. Try again in {retryAfterSeconds}s", ct);
 
@@ -63,12 +84,41 @@
 
                 if (_flood is not null)
                 {
-                    var floodResult = CheckFlood(session, msg, state);
+                    var floodResult = await _flood.CheckCommandAsync(session, msg, state, ct);
                     if (floodResult.IsFlooding)
                     {
+                        if (_autoDline is not null)
+                        {
+                            var applied = await _autoDline.ObserveFloodAsync(session, state, ct);
+                            if (applied)
+                            {
+                                try { await session.SendAsync("ERROR :D-Lined", ct); } catch { }
+                                await session.CloseAsync("D-Lined", ct);
+                                return;
+                            }
+                        }
+
                         var nick = session.Nick ?? "*";
-                        await session.SendAsync($":server NOTICE {nick} :Flood detected. Try again in {floodResult.CooldownSeconds}s", ct);
+
+                        if (floodResult.ShouldWarn)
+                        {
+                            await session.SendAsync($":server NOTICE {nick} :Flood detected. Try again in {floodResult.CooldownSeconds}s", ct);
+                        }
+
+                        if (floodResult.ShouldDisconnect)
+                        {
+                            try { await session.SendAsync("ERROR :Excess Flood", ct); } catch { }
+                            _metrics.FloodKick();
+                            await session.CloseAsync("Excess Flood", ct);
+                        }
+
                         return;
+                    }
+
+                    if (floodResult.ShouldWarn)
+                    {
+                        var nick = session.Nick ?? "*";
+                        await session.SendAsync($":server NOTICE {nick} :Approaching flood limit", ct);
                     }
                 }
 
@@ -78,51 +128,6 @@
             {
                 await session.SendAsync($":server 421 {session.Nick ?? "*"} {msg.Command} :Unknown command", ct);
             }
-        }
-
-        private FloodCheckResult CheckFlood(IClientSession session, IrcMessage msg, ServerState state)
-        {
-            state.TryGetUser(session.ConnectionId, out var user);
-
-            if (msg.Command.Equals("PRIVMSG", StringComparison.OrdinalIgnoreCase)
-                || msg.Command.Equals("NOTICE", StringComparison.OrdinalIgnoreCase))
-            {
-                var rawTargets = msg.Params is not null && msg.Params.Count > 0 ? msg.Params[0] : null;
-                if (string.IsNullOrWhiteSpace(rawTargets))
-                {
-                    return default;
-                }
-
-                FloodCheckResult worst = default;
-                foreach (var target in rawTargets.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-                {
-                    var r = _flood!.CheckMessageFlood(session.ConnectionId, target, user);
-                    if (r.IsFlooding)
-                    {
-                        return r;
-                    }
-
-                    if (r.ShouldWarn)
-                    {
-                        worst = r;
-                    }
-                }
-
-                return worst;
-            }
-
-            if (msg.Command.Equals("JOIN", StringComparison.OrdinalIgnoreCase)
-                || msg.Command.Equals("PART", StringComparison.OrdinalIgnoreCase))
-            {
-                return _flood!.CheckJoinPartFlood(session.ConnectionId, user);
-            }
-
-            if (msg.Command.Equals("NICK", StringComparison.OrdinalIgnoreCase))
-            {
-                return _flood!.CheckNickFlood(session.ConnectionId, user);
-            }
-
-            return default;
         }
 
         private static bool IsRateLimitedCommand(string command)
