@@ -2,6 +2,7 @@ namespace IRCd.Transport.Tls
 {
     using System;
     using System.Collections.Generic;
+    using System.Linq;
     using System.Net;
     using System.Net.Security;
     using System.Net.Sockets;
@@ -18,6 +19,8 @@ namespace IRCd.Transport.Tls
     using IRCd.Core.State;
     using IRCd.Shared.Options;
 
+    using IRCd.Transport;
+
     using Microsoft.Extensions.Hosting;
     using Microsoft.Extensions.Logging;
     using Microsoft.Extensions.Options;
@@ -25,23 +28,39 @@ namespace IRCd.Transport.Tls
     public sealed class TlsListenerHostedService : BackgroundService
     {
         private readonly ILogger<TlsListenerHostedService> _logger;
+        private readonly IIrcLogRedactor _logRedactor;
         private readonly CommandDispatcher _dispatcher;
         private readonly ServerState _state;
-        private readonly IOptions<IrcOptions> _options;
+        private readonly IOptionsMonitor<IrcOptions> _options;
         private readonly ISessionRegistry _sessions;
         private readonly HostmaskService _hostmask;
         private readonly ConnectionGuardService _guard;
         private readonly RoutingService _routing;
         private readonly RateLimitService _rateLimit;
         private readonly BanService _bans;
+        private readonly IConnectionPrecheckPipeline _precheck;
         private readonly IHostEnvironment _env;
         private readonly ServerLinkService _links;
 
         private readonly IMetrics _metrics;
 
+        private readonly IAcceptLoopStatus _acceptLoops;
+
+        private readonly ILoggerFactory _loggerFactory;
+
         private readonly IRCd.Transport.Tcp.SimpleFloodGate _floodGate;
 
         private readonly ConnectionAuthService? _authService;
+
+        private readonly LogRateLimiter _guardLogLimiter = new(windowSeconds: 10, maxEventsPerWindow: 3);
+
+        private readonly LogRateLimiter _handshakeLogLimiter = new(windowSeconds: 10, maxEventsPerWindow: 3);
+
+        private CancellationTokenSource? _acceptCts;
+        private IDisposable? _optionsSub;
+        private string _listenFingerprint = string.Empty;
+        private readonly object _restartLock = new();
+        private TaskCompletionSource<bool> _wakeup = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         private readonly object _listenerLock = new();
         private readonly List<TcpListener> _listeners = new();
@@ -53,21 +72,26 @@ namespace IRCd.Transport.Tls
 
         public TlsListenerHostedService(
             ILogger<TlsListenerHostedService> logger,
+            IIrcLogRedactor logRedactor,
             CommandDispatcher dispatcher,
             ServerState state,
-            IOptions<IrcOptions> options,
+            IOptionsMonitor<IrcOptions> options,
             ISessionRegistry sessions,
             ConnectionGuardService guard,
             RoutingService routing,
             HostmaskService hostmask,
             RateLimitService rateLimit,
             BanService bans,
+            IConnectionPrecheckPipeline precheck,
             IHostEnvironment env,
             ServerLinkService links,
             IMetrics metrics,
+            IAcceptLoopStatus acceptLoops,
+            ILoggerFactory loggerFactory,
             ConnectionAuthService? authService = null)
         {
             _logger = logger;
+            _logRedactor = logRedactor;
             _dispatcher = dispatcher;
             _state = state;
             _options = options;
@@ -77,13 +101,16 @@ namespace IRCd.Transport.Tls
             _hostmask = hostmask;
             _rateLimit = rateLimit;
             _bans = bans;
+            _precheck = precheck;
             _env = env;
             _links = links;
             _metrics = metrics;
+            _acceptLoops = acceptLoops;
+            _loggerFactory = loggerFactory;
 
             _authService = authService;
 
-            var flood = options.Value.Flood?.TlsClient;
+            var flood = options.CurrentValue.Flood?.TlsClient;
             var maxLines = flood?.MaxLines > 0 ? flood.MaxLines : 20;
             var windowSeconds = flood?.WindowSeconds > 0 ? flood.WindowSeconds : 10;
             _floodGate = new IRCd.Transport.Tcp.SimpleFloodGate(maxLines: maxLines, window: TimeSpan.FromSeconds(windowSeconds));
@@ -91,141 +118,266 @@ namespace IRCd.Transport.Tls
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            var listen = _options.Value.Listen;
-            if (listen is null || !listen.EnableTls)
-                return;
-
-            var certPath = listen.TlsCertificatePath;
-
-            if (string.IsNullOrWhiteSpace(certPath) && listen.AutoGenerateSelfSignedCertificate)
+            _listenFingerprint = ComputeFingerprint(_options.CurrentValue);
+            _optionsSub = _options.OnChange((cfg, _) =>
             {
-                try
+                var fp = ComputeFingerprint(cfg);
+                if (string.Equals(fp, _listenFingerprint, StringComparison.Ordinal))
                 {
-                    _cert = SelfSignedCertificateGenerator.CreateAndPersistPfx(
-                        _env.ContentRootPath,
-                        listen.AutoGeneratedCertPath,
-                        listen.AutoGeneratedCertPassword,
-                        listen.AutoGeneratedCertCommonName,
-                        listen.AutoGeneratedCertDaysValid);
-
-                    _logger.LogWarning(
-                        "Generated self-signed TLS certificate at {Path}. This is intended for dev/test, not production.",
-                        listen.AutoGeneratedCertPath);
-
-                    certPath = listen.AutoGeneratedCertPath;
-                    listen.TlsCertificatePath = certPath;
-                    listen.TlsCertificatePassword = listen.AutoGeneratedCertPassword;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to auto-generate self-signed TLS certificate. TLS listener will not start.");
                     return;
                 }
-            }
 
-            if (string.IsNullOrWhiteSpace(certPath))
+                _listenFingerprint = fp;
+                _logger.LogInformation("TLS listen config changed; restarting listeners");
+                Wakeup();
+                RequestRestart();
+            });
+
+            while (!stoppingToken.IsCancellationRequested)
             {
-                _logger.LogWarning("TLS enabled but TlsCertificatePath is empty. TLS listener will not start.");
-                return;
-            }
-
-            try
-            {
-                var fullPath = certPath;
-                if (!System.IO.Path.IsPathRooted(fullPath))
-                    fullPath = System.IO.Path.Combine(_env.ContentRootPath, fullPath);
-
-                if (!System.IO.File.Exists(fullPath) && listen.AutoGenerateSelfSignedCertificate)
+                var cfg = _options.CurrentValue;
+                var listen = cfg.Listen;
+                if (listen is null || !listen.EnableTls)
                 {
-                    _cert = SelfSignedCertificateGenerator.CreateAndPersistPfx(
-                        _env.ContentRootPath,
-                        listen.AutoGeneratedCertPath,
-                        listen.AutoGeneratedCertPassword,
-                        listen.AutoGeneratedCertCommonName,
-                        listen.AutoGeneratedCertDaysValid);
-                }
-                else
-                {
-                    _cert = string.IsNullOrWhiteSpace(listen.TlsCertificatePassword)
-                        ? X509CertificateLoader.LoadPkcs12FromFile(fullPath, null)
-                        : X509CertificateLoader.LoadPkcs12FromFile(fullPath, listen.TlsCertificatePassword);
+                    await WaitForWakeupAsync(stoppingToken);
+                    continue;
                 }
 
-                if (listen.TlsCertificates is not null && listen.TlsCertificates.Count > 0)
-                {
-                    _sniCerts = new Dictionary<string, X509Certificate2>(StringComparer.OrdinalIgnoreCase);
+                var certPath = listen.TlsCertificatePath;
+                var certPassword = listen.TlsCertificatePassword;
 
-                    foreach (var kv in listen.TlsCertificates)
+                if (string.IsNullOrWhiteSpace(certPath) && listen.AutoGenerateSelfSignedCertificate)
+                {
+                    try
                     {
-                        var name = kv.Key?.Trim();
-                        var cfg = kv.Value;
-                        if (string.IsNullOrWhiteSpace(name) || cfg is null || string.IsNullOrWhiteSpace(cfg.Path))
-                            continue;
+                        _cert = SelfSignedCertificateGenerator.CreateAndPersistPfx(
+                            _env.ContentRootPath,
+                            listen.AutoGeneratedCertPath,
+                            listen.AutoGeneratedCertPassword,
+                            listen.AutoGeneratedCertCommonName,
+                            listen.AutoGeneratedCertDaysValid);
 
-                        var p = cfg.Path;
-                        if (!System.IO.Path.IsPathRooted(p))
-                            p = System.IO.Path.Combine(_env.ContentRootPath, p);
+                        _logger.LogWarning(
+                            "Generated self-signed TLS certificate at {Path}. This is intended for dev/test, not production.",
+                            listen.AutoGeneratedCertPath);
 
-                        if (!System.IO.File.Exists(p))
-                            continue;
-
-                        var c = string.IsNullOrWhiteSpace(cfg.Password)
-                            ? X509CertificateLoader.LoadPkcs12FromFile(p, null)
-                            : X509CertificateLoader.LoadPkcs12FromFile(p, cfg.Password);
-
-                        _sniCerts[name] = c;
+                        certPath = listen.AutoGeneratedCertPath;
+                        certPassword = listen.AutoGeneratedCertPassword;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to auto-generate self-signed TLS certificate. TLS listener will not start.");
+                        await WaitForWakeupAsync(stoppingToken);
+                        continue;
                     }
                 }
 
-                _logger.LogInformation(
-                    "TLS certificate loaded. Subject={Subject} Thumbprint={Thumbprint}",
-                    _cert.Subject,
-                    _cert.Thumbprint);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to load TLS certificate from {Path}", listen.TlsCertificatePath);
-                return;
-            }
-
-            var endpoints = _options.Value.ListenEndpoints?.Where(e => e is not null && e.Tls).ToArray() ?? Array.Empty<ListenEndpointOptions>();
-            if (endpoints.Length == 0)
-            {
-                var port = listen.TlsClientPort > 0 ? listen.TlsClientPort : 6697;
-                endpoints = new[] { new ListenEndpointOptions { BindIp = listen.BindIp, Port = port, Tls = true } };
-            }
-
-            var tasks = new List<Task>(endpoints.Length);
-
-            foreach (var ep in endpoints)
-            {
-                var ip = IPAddress.Any;
-                if (!string.IsNullOrWhiteSpace(ep.BindIp) && IPAddress.TryParse(ep.BindIp, out var parsed))
-                    ip = parsed;
-
-                var listener = new TcpListener(ip, ep.Port);
-                listener.Start();
-
-                lock (_listenerLock)
+                if (string.IsNullOrWhiteSpace(certPath))
                 {
-                    _listeners.Add(listener);
+                    _logger.LogWarning("TLS enabled but TlsCertificatePath is empty. TLS listener will not start.");
+                    await WaitForWakeupAsync(stoppingToken);
+                    continue;
                 }
 
-                _logger.LogInformation("IRCd TLS listening on {IP}:{Port}", ip, ep.Port);
-                tasks.Add(Task.Run(() => AcceptLoopAsync(listener, stoppingToken), stoppingToken));
-            }
+                try
+                {
+                    var fullPath = certPath;
+                    if (!System.IO.Path.IsPathRooted(fullPath))
+                    {
+                        fullPath = System.IO.Path.Combine(_env.ContentRootPath, fullPath);
+                    }
 
-            await Task.WhenAll(tasks);
+                    if (!System.IO.File.Exists(fullPath) && listen.AutoGenerateSelfSignedCertificate)
+                    {
+                        _cert = SelfSignedCertificateGenerator.CreateAndPersistPfx(
+                            _env.ContentRootPath,
+                            listen.AutoGeneratedCertPath,
+                            listen.AutoGeneratedCertPassword,
+                            listen.AutoGeneratedCertCommonName,
+                            listen.AutoGeneratedCertDaysValid);
+                    }
+                    else
+                    {
+                        _cert = string.IsNullOrWhiteSpace(certPassword)
+                            ? X509CertificateLoader.LoadPkcs12FromFile(fullPath, null)
+                            : X509CertificateLoader.LoadPkcs12FromFile(fullPath, certPassword);
+                    }
+
+                    if (listen.TlsCertificates is not null && listen.TlsCertificates.Count > 0)
+                    {
+                        _sniCerts = new Dictionary<string, X509Certificate2>(StringComparer.OrdinalIgnoreCase);
+
+                        foreach (var kv in listen.TlsCertificates)
+                        {
+                            var name = kv.Key?.Trim();
+                            var certCfg = kv.Value;
+                            if (string.IsNullOrWhiteSpace(name) || certCfg is null || string.IsNullOrWhiteSpace(certCfg.Path))
+                            {
+                                continue;
+                            }
+
+                            var p = certCfg.Path;
+                            if (!System.IO.Path.IsPathRooted(p))
+                            {
+                                p = System.IO.Path.Combine(_env.ContentRootPath, p);
+                            }
+
+                            if (!System.IO.File.Exists(p))
+                            {
+                                continue;
+                            }
+
+                            var c = string.IsNullOrWhiteSpace(certCfg.Password)
+                                ? X509CertificateLoader.LoadPkcs12FromFile(p, null)
+                                : X509CertificateLoader.LoadPkcs12FromFile(p, certCfg.Password);
+
+                            _sniCerts[name] = c;
+                        }
+                    }
+
+                    _logger.LogInformation(
+                        "TLS certificate loaded. Subject={Subject} Thumbprint={Thumbprint}",
+                        _cert.Subject,
+                        _cert.Thumbprint);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to load TLS certificate from {Path}", certPath);
+                    await WaitForWakeupAsync(stoppingToken);
+                    continue;
+                }
+
+                var endpoints = GetTlsEndpoints(cfg);
+
+                var acceptCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                lock (_restartLock)
+                {
+                    _acceptCts?.Dispose();
+                    _acceptCts = acceptCts;
+                }
+
+                var acceptCt = acceptCts.Token;
+
+                var tasks = new List<Task>(endpoints.Length);
+
+                foreach (var ep in endpoints)
+                {
+                    var ip = IPAddress.Any;
+                    if (!string.IsNullOrWhiteSpace(ep.BindIp) && IPAddress.TryParse(ep.BindIp, out var parsed))
+                    {
+                        ip = parsed;
+                    }
+
+                    var listener = new TcpListener(ip, ep.Port);
+                    listener.Start();
+
+                    lock (_listenerLock)
+                    {
+                        _listeners.Add(listener);
+                    }
+
+                    _logger.LogInformation("IRCd TLS listening on {IP}:{Port}", ip, ep.Port);
+                    tasks.Add(Task.Run(() => AcceptLoopTrackedAsync(listener, acceptCt, stoppingToken), stoppingToken));
+                }
+
+                try
+                {
+                    await Task.WhenAll(tasks);
+                }
+                finally
+                {
+                    StopListenersOnly();
+
+                    lock (_restartLock)
+                    {
+                        if (ReferenceEquals(_acceptCts, acceptCts))
+                        {
+                            _acceptCts = null;
+                        }
+                    }
+
+                    acceptCts.Dispose();
+                }
+            }
         }
 
-        private async Task AcceptLoopAsync(TcpListener listener, CancellationToken ct)
+        private static ListenEndpointOptions[] GetTlsEndpoints(IrcOptions options)
         {
-            while (!ct.IsCancellationRequested)
+            var endpoints = options.ListenEndpoints?.Where(e => e is not null && e.Tls).ToArray() ?? Array.Empty<ListenEndpointOptions>();
+            if (endpoints.Length > 0)
+            {
+                return endpoints;
+            }
+
+            var listen = options.Listen;
+            var port = listen?.TlsClientPort > 0 ? listen.TlsClientPort : 6697;
+            return new[] { new ListenEndpointOptions { BindIp = listen?.BindIp ?? "0.0.0.0", Port = port, Tls = true } };
+        }
+
+        private static string ComputeFingerprint(IrcOptions options)
+        {
+            var listen = options.Listen;
+            if (listen is null || !listen.EnableTls)
+            {
+                return "disabled";
+            }
+
+            var endpoints = GetTlsEndpoints(options)
+                .Select(e => $"{(e.BindIp ?? "0.0.0.0").Trim()}:{e.Port}")
+                .OrderBy(s => s, StringComparer.Ordinal)
+                .ToArray();
+
+            var certKey = (listen.TlsCertificatePath ?? string.Empty).Trim();
+            var sniKey = listen.TlsCertificates is null
+                ? string.Empty
+                : string.Join(",", listen.TlsCertificates.Keys.Where(k => !string.IsNullOrWhiteSpace(k)).Select(k => k.Trim()).OrderBy(k => k, StringComparer.Ordinal));
+
+            return $"{certKey}|{sniKey}|{string.Join("|", endpoints)}";
+        }
+
+        private void Wakeup() => _wakeup.TrySetResult(true);
+
+        private Task WaitForWakeupAsync(CancellationToken stoppingToken)
+        {
+            var tcs = Interlocked.Exchange(ref _wakeup, new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously));
+            return tcs.Task.WaitAsync(stoppingToken);
+        }
+
+        private void RequestRestart()
+        {
+            CancellationTokenSource? cts;
+            lock (_restartLock)
+            {
+                cts = _acceptCts;
+            }
+
+            try { cts?.Cancel(); } catch { }
+            StopListenersOnly();
+        }
+
+        private void StopListenersOnly()
+        {
+            TcpListener[] listeners;
+            lock (_listenerLock)
+            {
+                listeners = _listeners.ToArray();
+                _listeners.Clear();
+            }
+
+            foreach (var l in listeners)
+            {
+                try { l.Stop(); } catch { }
+            }
+        }
+
+        private async Task AcceptLoopAsync(TcpListener listener, CancellationToken acceptCt, CancellationToken sessionCt)
+        {
+            while (!acceptCt.IsCancellationRequested)
             {
                 TcpClient client;
                 try
                 {
-                    client = await listener.AcceptTcpClientAsync(ct);
+                    client = await listener.AcceptTcpClientAsync(acceptCt);
                 }
                 catch (OperationCanceledException)
                 {
@@ -241,12 +393,36 @@ namespace IRCd.Transport.Tls
                     continue;
                 }
 
-                _ = Task.Run(() => HandleClientAsync(client, ct), ct);
+                _ = Task.Run(() => HandleClientAsync(client, sessionCt), sessionCt);
+            }
+        }
+
+        private async Task AcceptLoopTrackedAsync(TcpListener listener, CancellationToken acceptCt, CancellationToken sessionCt)
+        {
+            _acceptLoops.AcceptLoopStarted();
+            try
+            {
+                await AcceptLoopAsync(listener, acceptCt, sessionCt);
+            }
+            finally
+            {
+                _acceptLoops.AcceptLoopStopped();
             }
         }
 
         public override Task StopAsync(CancellationToken cancellationToken)
         {
+            try { _optionsSub?.Dispose(); } catch { }
+
+            try
+            {
+                lock (_restartLock)
+                {
+                    _acceptCts?.Cancel();
+                }
+            }
+            catch { }
+
             TcpListener[] listeners;
             lock (_listenerLock)
             {
@@ -289,7 +465,9 @@ namespace IRCd.Transport.Tls
         private static IPAddress GetRemoteIp(TcpClient client)
         {
             if (client.Client.RemoteEndPoint is IPEndPoint ep)
+            {
                 return ep.Address;
+            }
 
             return IPAddress.None;
         }
@@ -321,26 +499,55 @@ namespace IRCd.Transport.Tls
 
             var localEndPoint = client.Client.LocalEndPoint ?? new IPEndPoint(IPAddress.None, 0);
 
-            if (_guard.Enabled)
+            if (!_guard.TryAcceptNewConnection(remoteIp, secure: true, out var rejectReason))
             {
-                if (!_guard.TryAcceptNewConnection(remoteIp, out var rejectReason))
+                if (_guardLogLimiter.ShouldLog(remoteIp))
                 {
-                    try
-                    {
-                        using var stream = client.GetStream();
-                        using var writer = new System.IO.StreamWriter(stream, new UTF8Encoding(false))
-                        {
-                            NewLine = "\r\n",
-                            AutoFlush = true
-                        };
-
-                        await writer.WriteLineAsync($"ERROR :{rejectReason}");
-                    }
-                    catch { }
-
-                    try { client.Close(); } catch { }
-                    return;
+                    _logger.LogWarning("TLS client connection rejected from {RemoteIp}: {Reason}", remoteIp, rejectReason);
                 }
+
+                try
+                {
+                    using var stream = client.GetStream();
+                    using var writer = new System.IO.StreamWriter(stream, new UTF8Encoding(false))
+                    {
+                        NewLine = "\r\n",
+                        AutoFlush = true
+                    };
+
+                    await writer.WriteLineAsync($"ERROR :{rejectReason}");
+                }
+                catch { }
+
+                try { client.Close(); } catch { }
+                return;
+            }
+
+            var localIpEndPoint = localEndPoint as IPEndPoint ?? new IPEndPoint(IPAddress.None, 0);
+            var precheck = await _precheck.CheckAsync(new ConnectionPrecheckContext(remoteIp, localIpEndPoint, Secure: true), ct);
+            if (!precheck.Allowed)
+            {
+                var msg = precheck.RejectMessage ?? "Connection blocked";
+
+                try
+                {
+                    using var stream = client.GetStream();
+                    using var writer = new System.IO.StreamWriter(stream, new UTF8Encoding(false))
+                    {
+                        NewLine = "\r\n",
+                        AutoFlush = true
+                    };
+
+                    await writer.WriteLineAsync($"ERROR :{msg}");
+                }
+                catch { }
+
+                try { client.Close(); } catch { }
+
+                try { _guard.ReleaseActive(remoteIp); } catch { }
+                try { _guard.ReleaseUnregistered(remoteIp); } catch { }
+
+                return;
             }
 
             var connectionId = Guid.NewGuid().ToString("N");
@@ -351,6 +558,11 @@ namespace IRCd.Transport.Tls
 
             RemoteCertificateValidationCallback? remoteCertValidation = null;
             LocalCertificateSelectionCallback? certSelector = null;
+
+            if (_options.CurrentValue.Listen?.RequestClientCertificate == true)
+            {
+                remoteCertValidation = static (_, _, _, _) => true;
+            }
 
             if (_sniCerts is not null && _sniCerts.Count > 0)
             {
@@ -366,37 +578,72 @@ namespace IRCd.Transport.Tls
             }
 
             using var ssl = certSelector is null
-                ? new SslStream(net, leaveInnerStreamOpen: false)
+                ? new SslStream(net, leaveInnerStreamOpen: false, remoteCertValidation)
                 : new SslStream(net, leaveInnerStreamOpen: false, remoteCertValidation, certSelector);
 
             try
             {
+                if (!_guard.TryStartTlsHandshake(remoteIp, out var handshakeReject))
+                {
+                    if (_guardLogLimiter.ShouldLog(remoteIp))
+                    {
+                        _logger.LogWarning("TLS handshake rejected from {RemoteIp}: {Reason}", remoteIp, handshakeReject);
+                    }
+
+                    try { client.Close(); } catch { }
+
+                    try { _guard.ReleaseActive(remoteIp); } catch { }
+                    try { _guard.ReleaseUnregistered(remoteIp); } catch { }
+
+                    return;
+                }
+
                 var authOptions = new SslServerAuthenticationOptions
                 {
                     ServerCertificate = _cert,
                     EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
                     CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
                     AllowRenegotiation = false,
+                    ClientCertificateRequired = _options.CurrentValue.Listen?.RequestClientCertificate == true,
                 };
 
-                await ssl.AuthenticateAsServerAsync(authOptions, ct);
+                using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                handshakeCts.CancelAfter(TimeSpan.FromSeconds(_guard.GetTlsHandshakeTimeoutSeconds()));
+
+                await ssl.AuthenticateAsServerAsync(authOptions, handshakeCts.Token);
+            }
+            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                if (_handshakeLogLimiter.ShouldLog(remoteIp))
+                {
+                    _logger.LogInformation(ex, "TLS handshake timed out from {Remote}", remoteEndPoint);
+                }
+
+                try { client.Close(); } catch { }
+
+                try { _guard.ReleaseActive(remoteIp); } catch { }
+                try { _guard.ReleaseUnregistered(remoteIp); } catch { }
+
+                return;
             }
             catch (Exception ex)
             {
-                _logger.LogInformation(ex, "TLS handshake failed from {Remote}", remoteEndPoint);
+                if (_handshakeLogLimiter.ShouldLog(remoteIp))
+                {
+                    _logger.LogInformation(ex, "TLS handshake failed from {Remote}", remoteEndPoint);
+                }
                 try { client.Close(); } catch { }
 
-                if (_guard.Enabled)
-                {
-                    try { _guard.ReleaseActive(remoteIp); } catch { }
-                    try { _guard.ReleaseUnregistered(remoteIp); } catch { }
-                }
+                try { _guard.ReleaseActive(remoteIp); } catch { }
+                try { _guard.ReleaseUnregistered(remoteIp); } catch { }
 
                 return;
             }
 
-            var queueCap = _options.Value.Transport?.Queues?.ClientSendQueueCapacity ?? 256;
-            var session = new TlsClientSession(connectionId, remoteEndPoint, localEndPoint, ssl, queueCap);
+            var queueCap = _options.CurrentValue.Transport?.Queues?.ClientSendQueueCapacity ?? 256;
+            var maxLineChars = _options.CurrentValue.Transport?.ClientMaxLineChars ?? IRCd.Transport.Tcp.LineProtocol.MaxLineChars;
+            var sessionLogger = _loggerFactory.CreateLogger<TlsClientSession>();
+            var session = new TlsClientSession(connectionId, remoteEndPoint, localEndPoint, ssl, maxLineChars, queueCap, _metrics, sessionLogger);
 
             var metricsCounted = false;
 
@@ -427,7 +674,7 @@ namespace IRCd.Transport.Tls
 
             var writerTask = Task.Run(() => session.RunWriterLoopAsync(ct), ct);
 
-            var serverName = _options.Value.ServerInfo?.Name ?? "server";
+            var serverName = _options.CurrentValue.ServerInfo?.Name ?? "server";
             await session.SendAsync($":{serverName} NOTICE * :Welcome (TLS). Use NICK/USER.", ct);
 
             if (_authService is not null)
@@ -460,7 +707,9 @@ namespace IRCd.Transport.Tls
                     var completed = await Task.WhenAny(pendingRead, tick);
 
                     if (completed != pendingRead)
+                    {
                         continue;
+                    }
 
                     string? line;
                     try
@@ -473,10 +722,14 @@ namespace IRCd.Transport.Tls
                     pendingRead = null;
 
                     if (line is null)
+                    {
                         break;
+                    }
 
                     if (string.IsNullOrWhiteSpace(line))
+                    {
                         continue;
+                    }
 
                     if (!_floodGate.Allow(connectionId))
                     {
@@ -495,21 +748,26 @@ namespace IRCd.Transport.Tls
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogDebug(ex, "Bad line from {ConnId}: {Line}", connectionId, line);
+                        SafeIrcLogger.LogBadInboundLine(_logger, _logRedactor, connectionId, line, ex);
                         continue;
                     }
 
-                    await _dispatcher.DispatchAsync(session, msg, _state, ct);
+                    try
+                    {
+                        await _dispatcher.DispatchAsync(session, msg, _state, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        SafeIrcLogger.LogDispatchException(_logger, connectionId, msg.Command, ex);
+                        break;
+                    }
 
                     if (!markedRegistered && session.IsRegistered)
                     {
                         markedRegistered = true;
 
-                        if (_guard.Enabled)
-                        {
-                            _guard.MarkRegistered(remoteIp);
-                            unregisteredReleased = true;
-                        }
+                        _guard.MarkRegistered(remoteIp);
+                        unregisteredReleased = true;
                     }
                 }
             }
@@ -518,7 +776,7 @@ namespace IRCd.Transport.Tls
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "TLS client loop error {ConnId}", connectionId);
+                SafeIrcLogger.LogClientLoopError(_logger, connectionId, ex, tls: true);
             }
             finally
             {
@@ -569,15 +827,12 @@ namespace IRCd.Transport.Tls
                     _activeSessions.Remove(connectionId);
                 }
 
-                if (_guard.Enabled && !session.IsRegistered && !unregisteredReleased)
+                if (!session.IsRegistered && !unregisteredReleased)
                 {
                     try { _guard.ReleaseUnregistered(remoteIp); } catch { }
                 }
 
-                if (_guard.Enabled)
-                {
-                    try { _guard.ReleaseActive(remoteIp); } catch { }
-                }
+                try { _guard.ReleaseActive(remoteIp); } catch { }
 
                 try { await session.CloseAsync("Client disconnected", CancellationToken.None); } catch { }
 
