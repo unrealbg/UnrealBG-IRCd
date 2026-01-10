@@ -2,6 +2,7 @@ namespace IRCd.Core.Commands.Handlers
 {
     using System;
     using System.Collections.Generic;
+    using System.Net;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -24,8 +25,9 @@ namespace IRCd.Core.Commands.Handlers
         private readonly ISessionRegistry _sessions;
         private readonly SilenceService _silence;
         private readonly WatchService _watch;
+        private readonly IAuditLogService _audit;
 
-        public KillHandler(IOptions<IrcOptions> options, RoutingService routing, ServerLinkService links, ISessionRegistry sessions, SilenceService silence, WatchService watch)
+        public KillHandler(IOptions<IrcOptions> options, RoutingService routing, ServerLinkService links, ISessionRegistry sessions, SilenceService silence, WatchService watch, IAuditLogService? audit = null)
         {
             _options = options;
             _routing = routing;
@@ -33,6 +35,7 @@ namespace IRCd.Core.Commands.Handlers
             _sessions = sessions;
             _silence = silence;
             _watch = watch;
+            _audit = audit ?? NullAuditLogService.Instance;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -52,6 +55,8 @@ namespace IRCd.Core.Commands.Handlers
                 return;
             }
 
+            var sourceIp = oper.RemoteIp ?? (session.RemoteEndPoint as IPEndPoint)?.Address.ToString();
+
             if (msg.Params.Count < 1 || string.IsNullOrWhiteSpace(msg.Params[0]))
             {
                 await session.SendAsync($":{serverName} 461 {me} KILL :Not enough parameters", ct);
@@ -68,18 +73,51 @@ namespace IRCd.Core.Commands.Handlers
             if (!state.TryGetConnectionIdByNick(targetNick, out var targetConnId) || string.IsNullOrWhiteSpace(targetConnId))
             {
                 await session.SendAsync($":{serverName} 401 {me} {targetNick} :No such nick", ct);
+
+                await _audit.LogOperActionAsync(
+                    action: "KILL",
+                    session: session,
+                    actorUid: oper.Uid,
+                    actorNick: oper.Nick ?? me,
+                    sourceIp: sourceIp,
+                    target: targetNick,
+                    reason: reason,
+                    extra: new Dictionary<string, object?> { ["success"] = false, ["error"] = "no_such_nick" },
+                    ct: ct);
                 return;
             }
 
             if (!state.TryGetUser(targetConnId!, out var targetUser) || targetUser is null)
             {
                 await session.SendAsync($":{serverName} 401 {me} {targetNick} :No such nick", ct);
+
+                await _audit.LogOperActionAsync(
+                    action: "KILL",
+                    session: session,
+                    actorUid: oper.Uid,
+                    actorNick: oper.Nick ?? me,
+                    sourceIp: sourceIp,
+                    target: targetNick,
+                    reason: reason,
+                    extra: new Dictionary<string, object?> { ["success"] = false, ["error"] = "no_such_nick" },
+                    ct: ct);
                 return;
             }
 
             if (targetUser.IsService)
             {
                 await session.SendAsync($":{serverName} NOTICE {me} :Cannot KILL services", ct);
+
+                await _audit.LogOperActionAsync(
+                    action: "KILL",
+                    session: session,
+                    actorUid: oper.Uid,
+                    actorNick: oper.Nick ?? me,
+                    sourceIp: sourceIp,
+                    target: targetNick,
+                    reason: reason,
+                    extra: new Dictionary<string, object?> { ["success"] = false, ["error"] = "target_is_service" },
+                    ct: ct);
                 return;
             }
 
@@ -90,6 +128,17 @@ namespace IRCd.Core.Commands.Handlers
                 if (string.IsNullOrWhiteSpace(targetUser.Uid) || string.IsNullOrWhiteSpace(targetUser.RemoteSid))
                 {
                     await session.SendAsync($":{serverName} NOTICE {me} :Cannot route remote KILL", ct);
+
+                    await _audit.LogOperActionAsync(
+                        action: "KILL",
+                        session: session,
+                        actorUid: oper.Uid,
+                        actorNick: oper.Nick ?? me,
+                        sourceIp: sourceIp,
+                        target: targetNick,
+                        reason: reason,
+                        extra: new Dictionary<string, object?> { ["success"] = false, ["remote"] = true, ["error"] = "missing_remote_ids" },
+                        ct: ct);
                     return;
                 }
 
@@ -97,10 +146,32 @@ namespace IRCd.Core.Commands.Handlers
                 if (!ok)
                 {
                     await session.SendAsync($":{serverName} NOTICE {me} :Remote KILL routing failed", ct);
+
+                    await _audit.LogOperActionAsync(
+                        action: "KILL",
+                        session: session,
+                        actorUid: oper.Uid,
+                        actorNick: oper.Nick ?? me,
+                        sourceIp: sourceIp,
+                        target: targetNick,
+                        reason: reason,
+                        extra: new Dictionary<string, object?> { ["success"] = false, ["remote"] = true, ["error"] = "routing_failed", ["targetUid"] = targetUser.Uid, ["targetSid"] = targetUser.RemoteSid },
+                        ct: ct);
                     return;
                 }
 
                 await session.SendAsync($":{serverName} NOTICE {me} :KILL {targetNick} :{reason}", ct);
+
+                await _audit.LogOperActionAsync(
+                    action: "KILL",
+                    session: session,
+                    actorUid: oper.Uid,
+                    actorNick: oper.Nick ?? me,
+                    sourceIp: sourceIp,
+                    target: targetNick,
+                    reason: reason,
+                    extra: new Dictionary<string, object?> { ["success"] = true, ["remote"] = true, ["targetUid"] = targetUser.Uid, ["targetSid"] = targetUser.RemoteSid },
+                    ct: ct);
                 return;
             }
 
@@ -148,6 +219,17 @@ namespace IRCd.Core.Commands.Handlers
             state.RemoveUser(targetConnId!);
 
             await session.SendAsync($":{serverName} NOTICE {me} :KILL {targetNick} :{reason}", ct);
+
+            await _audit.LogOperActionAsync(
+                action: "KILL",
+                session: session,
+                actorUid: oper.Uid,
+                actorNick: oper.Nick ?? me,
+                sourceIp: sourceIp,
+                target: targetNick,
+                reason: reason,
+                extra: new Dictionary<string, object?> { ["success"] = true, ["remote"] = false, ["targetConnId"] = targetConnId, ["targetUid"] = targetUser.Uid },
+                ct: ct);
         }
     }
 }

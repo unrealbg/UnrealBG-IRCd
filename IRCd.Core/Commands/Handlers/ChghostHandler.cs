@@ -2,6 +2,7 @@ namespace IRCd.Core.Commands.Handlers
 {
     using System;
     using System.Collections.Generic;
+    using System.Net;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -21,12 +22,14 @@ namespace IRCd.Core.Commands.Handlers
         private readonly IOptions<IrcOptions> _options;
         private readonly RoutingService _routing;
         private readonly ISessionRegistry _sessions;
+        private readonly IAuditLogService _audit;
 
-        public ChghostHandler(IOptions<IrcOptions> options, RoutingService routing, ISessionRegistry sessions)
+        public ChghostHandler(IOptions<IrcOptions> options, RoutingService routing, ISessionRegistry sessions, IAuditLogService? audit = null)
         {
             _options = options;
             _routing = routing;
             _sessions = sessions;
+            _audit = audit ?? NullAuditLogService.Instance;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -46,6 +49,8 @@ namespace IRCd.Core.Commands.Handlers
                 await session.SendAsync($":{serverName} 481 {me} :Permission Denied- You're not an IRC operator", ct);
                 return;
             }
+
+            var sourceIp = oper.RemoteIp ?? (session.RemoteEndPoint as IPEndPoint)?.Address.ToString();
 
             if (msg.Params.Count < 3)
             {
@@ -131,6 +136,23 @@ namespace IRCd.Core.Commands.Handlers
             }
 
             await session.SendAsync($":{serverName} NOTICE {me} :CHGHOST {targetNick} {newIdent} {newHost}", ct);
+
+            await _audit.LogOperActionAsync(
+                action: "CHGHOST",
+                session: session,
+                actorUid: oper.Uid,
+                actorNick: oper.Nick ?? me,
+                sourceIp: sourceIp,
+                target: targetNick,
+                reason: null,
+                extra: new Dictionary<string, object?>
+                {
+                    ["oldIdent"] = oldIdent,
+                    ["oldHost"] = oldHost,
+                    ["newIdent"] = newIdent,
+                    ["newHost"] = newHost,
+                },
+                ct: ct);
         }
     }
 }

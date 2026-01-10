@@ -23,6 +23,7 @@ namespace IRCd.Core.Commands.Handlers
             "multi-prefix",
             "away-notify",
             "account-notify",
+            "sasl",
             "extended-join",
             "userhost-in-names",
             "echo-message"
@@ -46,7 +47,15 @@ namespace IRCd.Core.Commands.Handlers
 
             if (sub.Equals("LS", StringComparison.OrdinalIgnoreCase))
             {
-                await session.SendAsync($":{serverName} CAP {nick} LS :{string.Join(' ', SupportedCaps)}", ct);
+                var saslCap = _options.Value.Sasl.External.Enabled ? "sasl=PLAIN,EXTERNAL" : "sasl=PLAIN";
+
+                var caps = new List<string>(SupportedCaps.Length);
+                foreach (var c in SupportedCaps)
+                {
+                    caps.Add(string.Equals(c, "sasl", StringComparison.OrdinalIgnoreCase) ? saslCap : c);
+                }
+
+                await session.SendAsync($":{serverName} CAP {nick} LS :{string.Join(' ', caps)}", ct);
                 return;
             }
 

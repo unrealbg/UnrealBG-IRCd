@@ -1,5 +1,6 @@
 ﻿namespace IRCd.Core.Commands.Handlers
 {
+    using System.Linq;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -24,8 +25,19 @@
         private readonly SilenceService _silence;
         private readonly IServiceCommandDispatcher? _services;
         private readonly IServiceChannelEvents? _channelEvents;
+        private readonly IAuthState? _auth;
+        private readonly BanMatcher _banMatcher;
 
-        public PrivMsgHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask, IOptions<IrcOptions> options, SilenceService silence, IServiceCommandDispatcher? services = null, IServiceChannelEvents? channelEvents = null)
+        public PrivMsgHandler(
+            RoutingService routing,
+            ServerLinkService links,
+            HostmaskService hostmask,
+            IOptions<IrcOptions> options,
+            SilenceService silence,
+            IServiceCommandDispatcher? services = null,
+            IServiceChannelEvents? channelEvents = null,
+            IAuthState? auth = null,
+            BanMatcher? banMatcher = null)
         {
             _routing = routing;
             _links = links;
@@ -34,6 +46,8 @@
             _silence = silence;
             _services = services;
             _channelEvents = channelEvents;
+            _auth = auth;
+            _banMatcher = banMatcher ?? BanMatcher.Shared;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -92,6 +106,24 @@
                     {
                         await session.SendAsync($":server 403 {fromNick} {t} :No such channel", ct);
                         continue;
+                    }
+
+                    var accountName = "*";
+                    if (_auth is not null)
+                    {
+                        accountName = await _auth.GetIdentifiedAccountAsync(session.ConnectionId, ct) ?? "*";
+                    }
+
+                    var banInput = new ChannelBanMatchInput(fromNick, fromUser, host, accountName);
+                    var isBanned = channel.Bans.Any(b => _banMatcher.IsChannelBanMatch(b.Mask, banInput));
+                    if (isBanned)
+                    {
+                        var isExcepted = channel.ExceptBans.Any(e => _banMatcher.IsChannelExceptionMatch(e.Mask, banInput));
+                        if (!isExcepted)
+                        {
+                            await session.SendAsync($":server 404 {fromNick} {t} :Cannot send to channel (+b)", ct);
+                            continue;
+                        }
                     }
 
                     var isMember = channel.Contains(session.ConnectionId);

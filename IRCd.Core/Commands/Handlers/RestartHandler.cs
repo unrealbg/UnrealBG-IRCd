@@ -1,5 +1,7 @@
 namespace IRCd.Core.Commands.Handlers
 {
+    using System.Collections.Generic;
+    using System.Net;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -18,11 +20,13 @@ namespace IRCd.Core.Commands.Handlers
 
         private readonly IOptions<IrcOptions> _options;
         private readonly IHostApplicationLifetime _lifetime;
+        private readonly IAuditLogService _audit;
 
-        public RestartHandler(IOptions<IrcOptions> options, IHostApplicationLifetime lifetime)
+        public RestartHandler(IOptions<IrcOptions> options, IHostApplicationLifetime lifetime, IAuditLogService? audit = null)
         {
             _options = options;
             _lifetime = lifetime;
+            _audit = audit ?? NullAuditLogService.Instance;
         }
 
         public async ValueTask HandleAsync(IClientSession session, Protocol.IrcMessage msg, ServerState state, CancellationToken ct)
@@ -42,7 +46,30 @@ namespace IRCd.Core.Commands.Handlers
                 return;
             }
 
+            var sourceIp = user.RemoteIp ?? (session.RemoteEndPoint as IPEndPoint)?.Address.ToString();
+            var reason = msg.Trailing;
+            if (string.IsNullOrWhiteSpace(reason) && msg.Params.Count >= 1)
+            {
+                reason = msg.Params[0];
+            }
+
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                reason = null;
+            }
+
             await session.SendAsync($":{serverName} NOTICE {me} :Server is restarting", ct);
+
+            await _audit.LogOperActionAsync(
+                action: "RESTART",
+                session: session,
+                actorUid: user.Uid,
+                actorNick: user.Nick ?? me,
+                sourceIp: sourceIp,
+                target: null,
+                reason: reason,
+                extra: new Dictionary<string, object?> { ["success"] = true },
+                ct: ct);
             _lifetime.StopApplication();
         }
     }

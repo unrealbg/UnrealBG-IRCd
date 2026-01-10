@@ -1,5 +1,6 @@
 namespace IRCd.Core.Commands.Handlers
 {
+    using System.Linq;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -23,8 +24,18 @@ namespace IRCd.Core.Commands.Handlers
         private readonly IOptions<IrcOptions> _options;
         private readonly SilenceService _silence;
         private readonly IServiceCommandDispatcher? _services;
+        private readonly IAuthState? _auth;
+        private readonly BanMatcher _banMatcher;
 
-        public NoticeHandler(RoutingService routing, ServerLinkService links, HostmaskService hostmask, IOptions<IrcOptions> options, SilenceService silence, IServiceCommandDispatcher? services = null)
+        public NoticeHandler(
+            RoutingService routing,
+            ServerLinkService links,
+            HostmaskService hostmask,
+            IOptions<IrcOptions> options,
+            SilenceService silence,
+            IServiceCommandDispatcher? services = null,
+            IAuthState? auth = null,
+            BanMatcher? banMatcher = null)
         {
             _routing = routing;
             _links = links;
@@ -32,6 +43,8 @@ namespace IRCd.Core.Commands.Handlers
             _options = options;
             _silence = silence;
             _services = services;
+            _auth = auth;
+            _banMatcher = banMatcher ?? BanMatcher.Shared;
         }
 
         public async ValueTask HandleAsync(IClientSession session, IrcMessage msg, ServerState state, CancellationToken ct)
@@ -77,6 +90,23 @@ namespace IRCd.Core.Commands.Handlers
                     if (!state.TryGetChannel(t, out var channel) || channel is null)
                     {
                         continue;
+                    }
+
+                    var accountName = "*";
+                    if (_auth is not null)
+                    {
+                        accountName = await _auth.GetIdentifiedAccountAsync(session.ConnectionId, ct) ?? "*";
+                    }
+
+                    var banInput = new ChannelBanMatchInput(fromNick, fromUser, host, accountName);
+                    var isBanned = channel.Bans.Any(b => _banMatcher.IsChannelBanMatch(b.Mask, banInput));
+                    if (isBanned)
+                    {
+                        var isExcepted = channel.ExceptBans.Any(e => _banMatcher.IsChannelExceptionMatch(e.Mask, banInput));
+                        if (!isExcepted)
+                        {
+                            continue;
+                        }
                     }
 
                     var isMember = channel.Contains(session.ConnectionId);

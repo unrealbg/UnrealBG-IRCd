@@ -1,7 +1,9 @@
 namespace IRCd.Core.Commands.Handlers
 {
     using System;
+    using System.Collections.Generic;
     using System.Linq;
+    using System.Net;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -20,12 +22,14 @@ namespace IRCd.Core.Commands.Handlers
         private readonly IOptions<IrcOptions> _options;
         private readonly BanService _banService;
         private readonly IBanEnforcer _enforcement;
+        private readonly IAuditLogService _audit;
 
-        public KlineHandler(IOptions<IrcOptions> options, BanService banService, IBanEnforcer enforcement)
+        public KlineHandler(IOptions<IrcOptions> options, BanService banService, IBanEnforcer enforcement, IAuditLogService? audit = null)
         {
             _options = options;
             _banService = banService;
             _enforcement = enforcement;
+            _audit = audit ?? NullAuditLogService.Instance;
         }
 
         public async ValueTask HandleAsync(IClientSession session, Protocol.IrcMessage msg, ServerState state, CancellationToken ct)
@@ -45,6 +49,8 @@ namespace IRCd.Core.Commands.Handlers
                 return;
             }
 
+            var sourceIp = user.RemoteIp ?? (session.RemoteEndPoint as IPEndPoint)?.Address.ToString();
+
             if (msg.Params.Count < 1)
             {
                 await session.SendAsync($":{serverName} 461 {me} KLINE :Not enough parameters", ct);
@@ -58,6 +64,17 @@ namespace IRCd.Core.Commands.Handlers
                 var toRemove = rawMask.TrimStart('-').Trim();
                 var removed = await _banService.RemoveAsync(BanType.KLINE, toRemove, ct);
                 await session.SendAsync($":{serverName} NOTICE {me} :UNKLINE {(removed ? "removed" : "not found")} {toRemove}", ct);
+
+                await _audit.LogOperActionAsync(
+                    action: "UNKLINE",
+                    session: session,
+                    actorUid: user.Uid,
+                    actorNick: user.Nick ?? me,
+                    sourceIp: sourceIp,
+                    target: toRemove,
+                    reason: null,
+                    extra: new Dictionary<string, object?> { ["banType"] = "KLINE", ["removed"] = removed },
+                    ct: ct);
                 return;
             }
 
@@ -70,7 +87,6 @@ namespace IRCd.Core.Commands.Handlers
                 if (char.IsDigit(possibleDuration[0]) || possibleDuration.Equals("perm", StringComparison.OrdinalIgnoreCase))
                 {
                     expiresAt = BanEntry.ParseDuration(possibleDuration);
-                    // Reason comes from trailing or next param
                     var reason = msg.Trailing;
                     if (string.IsNullOrWhiteSpace(reason) && msg.Params.Count >= 3)
                     {
@@ -93,6 +109,17 @@ namespace IRCd.Core.Commands.Handlers
 
                     var expireText = expiresAt.HasValue ? $"expires {expiresAt.Value:yyyy-MM-dd HH:mm:ss} UTC" : "permanent";
                     await session.SendAsync($":{serverName} NOTICE {me} :KLINE added {mask} ({expireText}) :{reason}", ct);
+
+                    await _audit.LogOperActionAsync(
+                        action: "KLINE",
+                        session: session,
+                        actorUid: user.Uid,
+                        actorNick: user.Nick ?? me,
+                        sourceIp: sourceIp,
+                        target: mask,
+                        reason: reason,
+                        extra: new Dictionary<string, object?> { ["banType"] = "KLINE", ["expiresAtUtc"] = expiresAt },
+                        ct: ct);
                     return;
                 }
             }
@@ -118,6 +145,17 @@ namespace IRCd.Core.Commands.Handlers
             await _enforcement.EnforceBanImmediatelyAsync(permanentBan, ct);
 
             await session.SendAsync($":{serverName} NOTICE {me} :KLINE added {mask} (permanent) :{banReason}", ct);
+
+            await _audit.LogOperActionAsync(
+                action: "KLINE",
+                session: session,
+                actorUid: user.Uid,
+                actorNick: user.Nick ?? me,
+                sourceIp: sourceIp,
+                target: mask,
+                reason: banReason,
+                extra: new Dictionary<string, object?> { ["banType"] = "KLINE", ["expiresAtUtc"] = null },
+                ct: ct);
         }
     }
 }
