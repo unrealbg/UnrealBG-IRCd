@@ -334,6 +334,29 @@ public static class IrcOptionsValidation
         {
             errors.Add("bans.enforcement_check_interval must be > 0");
         }
+
+        if (o.ConnectionPrecheck is not null && o.ConnectionPrecheck.Enabled)
+        {
+            if (o.ConnectionPrecheck.GlobalTimeoutMs <= 0)
+            {
+                errors.Add("connectionprecheck.global_timeout_ms must be > 0");
+            }
+
+            if (o.ConnectionPrecheck.DnsblTimeoutMs < 0)
+            {
+                errors.Add("connectionprecheck.dnsbl_timeout_ms must be >= 0");
+            }
+
+            if (o.ConnectionPrecheck.TorTimeoutMs < 0)
+            {
+                errors.Add("connectionprecheck.tor_timeout_ms must be >= 0");
+            }
+
+            if (o.ConnectionPrecheck.VpnTimeoutMs < 0)
+            {
+                errors.Add("connectionprecheck.vpn_timeout_ms must be >= 0");
+            }
+        }
     }
 
     private static string ResolvePath(string contentRoot, string p)

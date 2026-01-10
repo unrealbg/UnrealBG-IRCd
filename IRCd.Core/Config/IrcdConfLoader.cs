@@ -1184,12 +1184,56 @@ namespace IRCd.Core.Config
                         continue;
                     }
 
-                    if (TryConsumeIdent("timeoutms"))
+                    if (TryConsumeIdent("fail_open") || TryConsumeIdent("failopen"))
+                    {
+                        ConsumePunct("=");
+                        _o.ConnectionPrecheck.FailOpen = ParseBoolValue(ParseValue());
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("timeoutms") || TryConsumeIdent("global_timeout_ms") || TryConsumeIdent("globaltimeoutms"))
                     {
                         ConsumePunct("=");
                         if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
                         {
-                            _o.ConnectionPrecheck.TimeoutMs = v;
+                            _o.ConnectionPrecheck.GlobalTimeoutMs = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("dnsbl_timeout_ms") || TryConsumeIdent("dnsbltimeoutms"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionPrecheck.DnsblTimeoutMs = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("tor_timeout_ms") || TryConsumeIdent("tortimeoutms"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionPrecheck.TorTimeoutMs = v;
+                        }
+
+                        ConsumeOptionalPunct(";");
+                        continue;
+                    }
+
+                    if (TryConsumeIdent("vpn_timeout_ms") || TryConsumeIdent("vpntimeoutms"))
+                    {
+                        ConsumePunct("=");
+                        if (int.TryParse(ParseValue(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+                        {
+                            _o.ConnectionPrecheck.VpnTimeoutMs = v;
                         }
 
                         ConsumeOptionalPunct(";");
