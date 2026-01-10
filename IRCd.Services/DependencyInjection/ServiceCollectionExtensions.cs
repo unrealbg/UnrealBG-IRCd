@@ -1,10 +1,13 @@
 ﻿namespace IRCd.Services.DependencyInjection
 {
+    using System;
     using System.IO;
 
     using IRCd.Core.Abstractions;
+    using IRCd.Core.Config;
     using IRCd.Core.Protocol;
     using IRCd.Core.Services;
+    using IRCd.Shared.Options;
     using IRCd.Services.Agent;
     using IRCd.Services.Auth;
     using IRCd.Services.AdminServ;
@@ -26,13 +29,39 @@
 
     using Microsoft.Extensions.DependencyInjection;
     using Microsoft.Extensions.DependencyInjection.Extensions;
+    using Microsoft.Extensions.FileProviders;
     using Microsoft.Extensions.Hosting;
+    using Microsoft.Extensions.Logging;
+    using Microsoft.Extensions.Logging.Abstractions;
+    using Microsoft.Extensions.Options;
 
     public static class ServiceCollectionExtensions
     {
         public static IServiceCollection AddIrcServices(this IServiceCollection services)
         {
             services.AddLogging();
+
+            services.TryAddSingleton<IrcOptionsStore>(sp =>
+            {
+                var current = sp.GetService<IOptions<IrcOptions>>()?.Value;
+                if (current is null)
+                {
+                    current = new IrcOptions();
+                }
+
+                return new IrcOptionsStore(current);
+            });
+
+            services.TryAddSingleton<IOptionsMonitor<IrcOptions>>(sp => sp.GetRequiredService<IrcOptionsStore>());
+
+            services.TryAddSingleton<IrcConfigManager>(sp =>
+            {
+                var store = sp.GetRequiredService<IrcOptionsStore>();
+                var env = sp.GetService<IHostEnvironment>() ?? new FallbackHostEnvironment();
+                var listeners = sp.GetServices<IConfigReloadListener>() ?? Array.Empty<IConfigReloadListener>();
+                var logger = sp.GetService<ILogger<IrcConfigManager>>() ?? NullLogger<IrcConfigManager>.Instance;
+                return new IrcConfigManager(store, env, listeners, logger);
+            });
 
             services.TryAddSingleton<IrcFormatter>();
             services.TryAddSingleton<RoutingService>();
@@ -75,7 +104,8 @@
                 }
 
                 var logger = sp.GetService<Microsoft.Extensions.Logging.ILogger<FileNickAccountRepository>>();
-                return new FileNickAccountRepository(ResolvePath(sp, path), logger);
+                var persistence = opts?.Services?.Persistence;
+                return new FileNickAccountRepository(ResolvePath(sp, path), persistence, logger);
             });
 
             services.AddSingleton<IChanServChannelRepository>(sp =>
@@ -88,7 +118,8 @@
                 }
 
                 var logger = sp.GetService<Microsoft.Extensions.Logging.ILogger<FileChanServChannelRepository>>();
-                return new FileChanServChannelRepository(ResolvePath(sp, path), logger);
+                var persistence = opts?.Services?.Persistence;
+                return new FileChanServChannelRepository(ResolvePath(sp, path), persistence, logger);
             });
 
             services.AddSingleton<IMemoRepository>(sp =>
@@ -101,7 +132,8 @@
                 }
 
                 var logger = sp.GetService<Microsoft.Extensions.Logging.ILogger<FileMemoRepository>>();
-                return new FileMemoRepository(ResolvePath(sp, path), logger);
+                var persistence = opts?.Services?.Persistence;
+                return new FileMemoRepository(ResolvePath(sp, path), persistence, logger);
             });
 
             services.AddSingleton<ISeenRepository>(sp =>
@@ -114,7 +146,8 @@
                 }
 
                 var logger = sp.GetService<Microsoft.Extensions.Logging.ILogger<FileSeenRepository>>();
-                return new FileSeenRepository(ResolvePath(sp, path), logger);
+                var persistence = opts?.Services?.Persistence;
+                return new FileSeenRepository(ResolvePath(sp, path), persistence, logger);
             });
 
             services.AddSingleton<IAdminStaffRepository>(sp =>
@@ -127,7 +160,8 @@
                 }
 
                 var logger = sp.GetService<Microsoft.Extensions.Logging.ILogger<FileAdminStaffRepository>>();
-                return new FileAdminStaffRepository(ResolvePath(sp, path), logger);
+                var persistence = opts?.Services?.Persistence;
+                return new FileAdminStaffRepository(ResolvePath(sp, path), persistence, logger);
             });
 
             services.AddSingleton<IVHostRepository>(sp =>
@@ -140,9 +174,12 @@
                 }
 
                 var logger = sp.GetService<Microsoft.Extensions.Logging.ILogger<FileVHostRepository>>();
-                return new FileVHostRepository(ResolvePath(sp, path), logger);
+                var persistence = opts?.Services?.Persistence;
+                return new FileVHostRepository(ResolvePath(sp, path), persistence, logger);
             });
             services.AddSingleton<IAuthState, InMemoryAuthState>();
+
+            services.AddSingleton<ISaslPlainAuthenticator, NickServSaslPlainAuthenticator>();
 
             services.TryAddSingleton<BotAssignmentService>();
 
@@ -192,6 +229,26 @@
             services.AddSingleton<IServiceChannelEvents>(sp => sp.GetRequiredService<ServicesChannelEvents>());
 
             return services;
+        }
+
+        private sealed class FallbackHostEnvironment : IHostEnvironment
+        {
+            public FallbackHostEnvironment()
+            {
+                ContentRootPath = Directory.GetCurrentDirectory();
+                EnvironmentName = "Production";
+                ApplicationName = "IRCd";
+            }
+
+            public string EnvironmentName { get; set; }
+            public string ApplicationName { get; set; }
+            public string ContentRootPath { get; set; }
+
+            public IFileProvider ContentRootFileProvider
+            {
+                get => throw new NotImplementedException();
+                set => throw new NotImplementedException();
+            }
         }
     }
 }
