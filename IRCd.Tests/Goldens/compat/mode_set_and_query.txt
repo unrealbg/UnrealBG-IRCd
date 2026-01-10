@@ -1,0 +1,4 @@
+﻿# Alice sets +im
+:Alice!ident@host MODE #c +im
+# Bob queries MODE
+:server 324 Bob #c +ntim

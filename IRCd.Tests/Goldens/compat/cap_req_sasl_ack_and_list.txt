@@ -1,0 +1,3 @@
+﻿# CAP REQ :sasl
+# CAP LIST
+:server CAP Nick LIST :

@@ -1,0 +1,2 @@
+﻿# Carol JOIN #c
+:server 471 Carol #c :Cannot join channel (+l)

@@ -1,0 +1,2 @@
+﻿# TOPIC #c :hi
+:Alice!ident@localhost TOPIC #c :hi

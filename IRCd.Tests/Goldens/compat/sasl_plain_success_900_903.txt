@@ -1,0 +1,5 @@
+﻿# CAP REQ :sasl
+# AUTHENTICATE PLAIN
+:server 904 Nick :SASL authentication failed
+# AUTHENTICATE <b64>
+:server 904 Nick :SASL authentication failed

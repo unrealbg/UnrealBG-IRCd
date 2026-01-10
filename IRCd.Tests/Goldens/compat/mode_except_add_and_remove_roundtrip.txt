@@ -1,0 +1,6 @@
+﻿# Add except
+:Alice!ident@host MODE #c +e good!*@*
+# Remove except
+:Alice!ident@host MODE #c -e good!*@*
+# List except
+:server 349 Alice #c :End of Channel Exception List

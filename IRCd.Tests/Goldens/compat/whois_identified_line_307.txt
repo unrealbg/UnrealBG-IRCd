@@ -1,0 +1,7 @@
+﻿# WHOIS Target
+:server 311 Req Target ident host * :Real Name
+:server 312 Req Target server :test
+:server 307 Req Target :has identified for this nickname
+:server 378 Req Target :is connecting from *@host
+:server 317 Req Target 10 1699999900 :seconds idle, signon time
+:server 318 Req Target :End of /WHOIS list.

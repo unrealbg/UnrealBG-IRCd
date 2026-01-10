@@ -1,0 +1,7 @@
+﻿# WHOIS AwayNick
+:server 311 Req AwayNick ident host * :Real Name
+:server 301 Req AwayNick :gone
+:server 312 Req AwayNick server :test
+:server 378 Req AwayNick :is connecting from *@host
+:server 317 Req AwayNick 10 1699999900 :seconds idle, signon time
+:server 318 Req AwayNick :End of /WHOIS list.

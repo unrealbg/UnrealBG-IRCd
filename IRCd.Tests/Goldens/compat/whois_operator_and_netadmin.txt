@@ -1,0 +1,8 @@
+﻿# WHOIS Oper
+:server 311 Req Oper ident host * :Real Name
+:server 312 Req Oper server :test
+:server 313 Req Oper :is an IRC Operator
+:server 320 Req Oper :is a Network Administrator
+:server 378 Req Oper :is connecting from *@host
+:server 317 Req Oper 10 1699999900 :seconds idle, signon time
+:server 318 Req Oper :End of /WHOIS list.

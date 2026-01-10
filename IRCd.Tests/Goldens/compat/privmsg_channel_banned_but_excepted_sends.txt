@@ -1,0 +1,3 @@
+﻿# Alice PRIVMSG #c
+# Bob receives
+:Alice!ident@host PRIVMSG #c :hi

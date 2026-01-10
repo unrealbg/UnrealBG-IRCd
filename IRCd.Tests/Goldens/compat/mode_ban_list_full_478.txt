@@ -1,0 +1,2 @@
+﻿# MODE #c +b *!*@worse.host
+:server 478 Alice #c *!*@worse.host :Channel ban list is full

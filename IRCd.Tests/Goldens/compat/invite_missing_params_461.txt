@@ -1,0 +1,2 @@
+﻿# script
+:server 461 Nick INVITE :Not enough parameters

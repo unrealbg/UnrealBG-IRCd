@@ -1,0 +1,3 @@
+﻿# TOPIC #c
+:server 332 Alice #c :Hello
+:server 333 Alice #c Alice!ident@localhost 123

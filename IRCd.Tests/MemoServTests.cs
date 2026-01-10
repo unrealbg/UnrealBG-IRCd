@@ -1,0 +1,259 @@
+namespace IRCd.Tests
+{
+    using System.Net;
+    using System.Threading;
+    using System.Threading.Tasks;
+
+    using IRCd.Core.Abstractions;
+    using IRCd.Core.Commands.Handlers;
+    using IRCd.Core.Protocol;
+    using IRCd.Core.Services;
+    using IRCd.Core.State;
+    using IRCd.Services;
+    using IRCd.Services.DependencyInjection;
+    using IRCd.Shared.Options;
+
+    using Microsoft.Extensions.DependencyInjection;
+    using Microsoft.Extensions.Options;
+
+    using Xunit;
+
+    public sealed class MemoServTests
+    {
+        private sealed class TestSession : IClientSession
+        {
+            public string ConnectionId { get; set; } = "c1";
+            public EndPoint RemoteEndPoint { get; } = new IPEndPoint(IPAddress.Loopback, 1234);
+            public EndPoint LocalEndPoint { get; } = new IPEndPoint(IPAddress.Loopback, 6667);
+            public bool IsSecureConnection { get; set; }
+
+            public ISet<string> EnabledCapabilities { get; } =
+                new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+
+            public string? Nick { get; set; }
+            public string? UserName { get; set; }
+            public bool PassAccepted { get; set; }
+            public bool IsRegistered { get; set; }
+
+            public System.DateTime LastActivityUtc { get; } = System.DateTime.UtcNow;
+            public System.DateTime LastPingUtc { get; } = System.DateTime.UtcNow;
+            public bool AwaitingPong { get; }
+            public string? LastPingToken { get; }
+
+            public string UserModes => string.Empty;
+            public bool TryApplyUserModes(string modeString, out string appliedModes) { appliedModes = modeString; return true; }
+
+            public void OnInboundLine() { }
+            public void OnPingSent(string token) { }
+            public void OnPongReceived(string? token) { }
+
+            public readonly List<string> Sent = new();
+
+            public ValueTask SendAsync(string line, CancellationToken ct = default)
+            {
+                Sent.Add(line);
+                return ValueTask.CompletedTask;
+            }
+
+            public ValueTask CloseAsync(string reason, CancellationToken ct = default)
+                => ValueTask.CompletedTask;
+        }
+
+        private static (ServerState State, InMemorySessionRegistry Sessions, PrivMsgHandler Handler, ServiceProvider Sp) BuildPrivmsgHarness()
+        {
+            var state = new ServerState();
+            var sessions = new InMemorySessionRegistry();
+            var routing = new RoutingService(sessions, new IrcFormatter());
+            var silence = new SilenceService();
+
+            var services = new ServiceCollection();
+            services.AddSingleton<ISessionRegistry>(sessions);
+            services.AddSingleton(routing);
+            services.AddSingleton(silence);
+            services.AddSingleton(new HostmaskService());
+
+            var opts = Options.Create(new IrcOptions { ServerInfo = new ServerInfoOptions { Name = "srv", Sid = "001" } });
+            services.AddSingleton<IOptions<IrcOptions>>(opts);
+            services.AddIrcServices();
+
+            var sp = services.BuildServiceProvider();
+
+            var links = new ServerLinkService(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<ServerLinkService>.Instance,
+                new OptionsMonitorStub<IrcOptions>(opts.Value),
+                state,
+                routing,
+                sessions,
+                silence,
+                new WatchService(opts, routing));
+
+            var h = new PrivMsgHandler(
+                routing,
+                links,
+                sp.GetRequiredService<HostmaskService>(),
+                opts,
+                silence,
+                sp.GetRequiredService<IServiceCommandDispatcher>());
+
+            return (state, sessions, h, sp);
+        }
+
+        private sealed class OptionsMonitorStub<T> : IOptionsMonitor<T> where T : class
+        {
+            private readonly T _value;
+
+            public OptionsMonitorStub(T value) => _value = value;
+
+            public T CurrentValue => _value;
+
+            public T Get(string? name) => _value;
+
+            public IDisposable? OnChange(Action<T, string?> listener) => null;
+        }
+
+        [Fact]
+        public async Task MemoServ_Send_List_Read_Del_Works()
+        {
+            var (state, sessions, h, _) = BuildPrivmsgHarness();
+
+            // Ensure service pseudo-users exist (not strictly required for MemoServ commands, but keeps services consistent).
+            ServiceUserSeeder.EnsureServiceUsers(state, new IrcOptions { ServerInfo = new ServerInfoOptions { Name = "srv", Network = "UnrealBG" } });
+
+            state.TryAddUser(new User { ConnectionId = "a", Nick = "alice", UserName = "a", Host = "h", IsRegistered = true });
+            var alice = new TestSession { ConnectionId = "a", Nick = "alice", UserName = "a", IsRegistered = true };
+            sessions.Add(alice);
+
+            state.TryAddUser(new User { ConnectionId = "b", Nick = "bob", UserName = "b", Host = "h2", IsRegistered = true });
+            var bob = new TestSession { ConnectionId = "b", Nick = "bob", UserName = "b", IsRegistered = true };
+            sessions.Add(bob);
+
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "REGISTER alice@test.com apw"), state, CancellationToken.None);
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "IDENTIFY apw"), state, CancellationToken.None);
+
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "REGISTER bob@test.com bpw"), state, CancellationToken.None);
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "IDENTIFY bpw"), state, CancellationToken.None);
+
+            alice.Sent.Clear();
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "MemoServ" }, "SEND bob hi there"), state, CancellationToken.None);
+            Assert.Contains(alice.Sent, l => l.Contains("Memo sent", StringComparison.OrdinalIgnoreCase));
+
+            bob.Sent.Clear();
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "MemoServ" }, "LIST"), state, CancellationToken.None);
+            Assert.Contains(bob.Sent, l => l.Contains("From alice", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(bob.Sent, l => l.Contains("hi there", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(bob.Sent, l => l.Contains("[N]", StringComparison.OrdinalIgnoreCase));
+
+            bob.Sent.Clear();
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "MemoServ" }, "READ 1"), state, CancellationToken.None);
+            Assert.Contains(bob.Sent, l => l.Contains("Memo 1 from alice", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(bob.Sent, l => l.Contains("hi there", StringComparison.OrdinalIgnoreCase));
+
+            bob.Sent.Clear();
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "MemoServ" }, "LIST"), state, CancellationToken.None);
+            Assert.Contains(bob.Sent, l => l.Contains("[R]", StringComparison.OrdinalIgnoreCase));
+
+            bob.Sent.Clear();
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "MemoServ" }, "DEL 1"), state, CancellationToken.None);
+            Assert.Contains(bob.Sent, l => l.Contains("Deleted", StringComparison.OrdinalIgnoreCase));
+
+            bob.Sent.Clear();
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "MemoServ" }, "LIST"), state, CancellationToken.None);
+            Assert.Contains(bob.Sent, l => l.Contains("no memos", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public async Task NickServ_Identify_Sends_UnreadMemo_Notice()
+        {
+            var (state, sessions, h, _) = BuildPrivmsgHarness();
+
+            ServiceUserSeeder.EnsureServiceUsers(state, new IrcOptions { ServerInfo = new ServerInfoOptions { Name = "srv", Network = "UnrealBG" } });
+
+            state.TryAddUser(new User { ConnectionId = "a", Nick = "alice", UserName = "a", Host = "h", IsRegistered = true });
+            var alice = new TestSession { ConnectionId = "a", Nick = "alice", UserName = "a", IsRegistered = true };
+            sessions.Add(alice);
+
+            state.TryAddUser(new User { ConnectionId = "b", Nick = "bob", UserName = "b", Host = "h2", IsRegistered = true });
+            var bob = new TestSession { ConnectionId = "b", Nick = "bob", UserName = "b", IsRegistered = true };
+            sessions.Add(bob);
+
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "REGISTER alice@test.com apw"), state, CancellationToken.None);
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "IDENTIFY apw"), state, CancellationToken.None);
+
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "REGISTER bob@test.com bpw"), state, CancellationToken.None);
+
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "MemoServ" }, "SEND bob hello"), state, CancellationToken.None);
+
+            bob.Sent.Clear();
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "IDENTIFY bpw"), state, CancellationToken.None);
+
+            Assert.Contains(bob.Sent, l => l.Contains(":MemoServ!services@", StringComparison.OrdinalIgnoreCase) && l.Contains("new memo", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public async Task NickServ_Set_MemoSignon_Off_Disables_UnreadMemo_Notice_OnIdentify()
+        {
+            var (state, sessions, h, _) = BuildPrivmsgHarness();
+            ServiceUserSeeder.EnsureServiceUsers(state, new IrcOptions { ServerInfo = new ServerInfoOptions { Name = "srv", Network = "UnrealBG" } });
+
+            state.TryAddUser(new User { ConnectionId = "a", Nick = "alice", UserName = "a", Host = "h", IsRegistered = true });
+            var alice = new TestSession { ConnectionId = "a", Nick = "alice", UserName = "a", IsRegistered = true };
+            sessions.Add(alice);
+
+            state.TryAddUser(new User { ConnectionId = "b", Nick = "bob", UserName = "b", Host = "h2", IsRegistered = true });
+            var bob = new TestSession { ConnectionId = "b", Nick = "bob", UserName = "b", IsRegistered = true };
+            sessions.Add(bob);
+
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "REGISTER alice@test.com apw"), state, CancellationToken.None);
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "IDENTIFY apw"), state, CancellationToken.None);
+
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "REGISTER bob@test.com bpw"), state, CancellationToken.None);
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "IDENTIFY bpw"), state, CancellationToken.None);
+
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "SET MEMOSIGNON OFF"), state, CancellationToken.None);
+
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "MemoServ" }, "SEND bob hello"), state, CancellationToken.None);
+
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "LOGOUT"), state, CancellationToken.None);
+            bob.Sent.Clear();
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "IDENTIFY bpw"), state, CancellationToken.None);
+
+            Assert.DoesNotContain(bob.Sent, l => l.Contains(":MemoServ!services@", StringComparison.OrdinalIgnoreCase) && l.Contains("new memo", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public async Task MemoServ_Send_Respects_AllowMemos_And_MemoNotify()
+        {
+            var (state, sessions, h, _) = BuildPrivmsgHarness();
+            ServiceUserSeeder.EnsureServiceUsers(state, new IrcOptions { ServerInfo = new ServerInfoOptions { Name = "srv", Network = "UnrealBG" } });
+
+            state.TryAddUser(new User { ConnectionId = "a", Nick = "alice", UserName = "a", Host = "h", IsRegistered = true });
+            var alice = new TestSession { ConnectionId = "a", Nick = "alice", UserName = "a", IsRegistered = true };
+            sessions.Add(alice);
+
+            state.TryAddUser(new User { ConnectionId = "b", Nick = "bob", UserName = "b", Host = "h2", IsRegistered = true });
+            var bob = new TestSession { ConnectionId = "b", Nick = "bob", UserName = "b", IsRegistered = true };
+            sessions.Add(bob);
+
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "REGISTER alice@test.com apw"), state, CancellationToken.None);
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "IDENTIFY apw"), state, CancellationToken.None);
+
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "REGISTER bob@test.com bpw"), state, CancellationToken.None);
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "IDENTIFY bpw"), state, CancellationToken.None);
+
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "SET MEMONOTIFY OFF"), state, CancellationToken.None);
+            bob.Sent.Clear();
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "MemoServ" }, "SEND bob hi"), state, CancellationToken.None);
+            Assert.DoesNotContain(bob.Sent, l => l.Contains("new memo", StringComparison.OrdinalIgnoreCase));
+
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "SET MEMONOTIFY ON"), state, CancellationToken.None);
+            bob.Sent.Clear();
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "MemoServ" }, "SEND bob hi again"), state, CancellationToken.None);
+            Assert.Contains(bob.Sent, l => l.Contains("new memo", StringComparison.OrdinalIgnoreCase));
+
+            await h.HandleAsync(bob, new IrcMessage(null, "PRIVMSG", new[] { "NickServ" }, "SET ALLOWMEMOS OFF"), state, CancellationToken.None);
+            alice.Sent.Clear();
+            await h.HandleAsync(alice, new IrcMessage(null, "PRIVMSG", new[] { "MemoServ" }, "SEND bob blocked"), state, CancellationToken.None);
+            Assert.Contains(alice.Sent, l => l.Contains("does not accept memos", StringComparison.OrdinalIgnoreCase));
+        }
+    }
+}

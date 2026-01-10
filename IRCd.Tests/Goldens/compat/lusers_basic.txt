@@ -1,0 +1,5 @@
+﻿# LUSERS
+:server 251 Nick :There are 1 users and 0 unknown connections
+:server 252 Nick 0 :operator(s) online
+:server 254 Nick 0 :channels formed
+:server 255 Nick :I have 1 clients and 0 servers

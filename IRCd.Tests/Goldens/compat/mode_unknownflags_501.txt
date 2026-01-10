@@ -1,0 +1,2 @@
+﻿# script
+:server 501 Nick :Unknown MODE flags

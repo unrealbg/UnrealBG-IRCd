@@ -1,0 +1,2 @@
+﻿# MODE #c +b
+:server 368 Alice #c :End of Channel Ban List

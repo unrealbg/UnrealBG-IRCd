@@ -1,0 +1,6 @@
+﻿# Add ban
+:Alice!ident@host MODE #c +b bad!*@*
+# Remove ban
+:Alice!ident@host MODE #c -b bad!*@*
+# List bans
+:server 368 Alice #c :End of Channel Ban List

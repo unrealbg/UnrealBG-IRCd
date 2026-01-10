@@ -1,0 +1,3 @@
+﻿# script
+:server 401 Nick !!! :No such nick
+:server 318 Nick !!! :End of /WHOIS list.
