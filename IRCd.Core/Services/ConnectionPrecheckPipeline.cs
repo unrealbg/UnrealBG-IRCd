@@ -12,11 +12,14 @@ using Microsoft.Extensions.Options;
 
 public sealed class ConnectionPrecheckPipeline : IConnectionPrecheckPipeline
 {
+    private const string TimeoutRejectMessage = "precheck-timeout";
+
     private readonly IOptionsMonitor<IrcOptions> _options;
     private readonly IServerClock _clock;
     private readonly IDnsResolver _dns;
     private readonly BanService _bans;
     private readonly ILogger<ConnectionPrecheckPipeline> _logger;
+    private readonly IConnectionPrecheckMetrics? _metrics;
 
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new(StringComparer.Ordinal);
 
@@ -25,13 +28,15 @@ public sealed class ConnectionPrecheckPipeline : IConnectionPrecheckPipeline
         IServerClock clock,
         IDnsResolver dns,
         BanService bans,
-        ILogger<ConnectionPrecheckPipeline> logger)
+        ILogger<ConnectionPrecheckPipeline> logger,
+        IConnectionPrecheckMetrics? metrics = null)
     {
         _options = options;
         _clock = clock;
         _dns = dns;
         _bans = bans;
         _logger = logger;
+        _metrics = metrics;
     }
 
     public async Task<ConnectionPrecheckResult> CheckAsync(ConnectionPrecheckContext context, CancellationToken ct)
@@ -56,30 +61,38 @@ public sealed class ConnectionPrecheckPipeline : IConnectionPrecheckPipeline
         }
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(1, cfg.TimeoutMs)));
+        cts.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(1, cfg.GlobalTimeoutMs)));
 
-        var result = await RunChecksAsync(context, cfg, cts.Token);
+        var result = await RunChecksAsync(context, cfg, cts.Token, ct);
 
-        TryCache(key, result, cfg, now);
+        if (!string.Equals(result.RejectMessage, TimeoutRejectMessage, StringComparison.Ordinal))
+        {
+            TryCache(key, result, cfg, now);
+        }
 
         return result;
     }
 
-    private async Task<ConnectionPrecheckResult> RunChecksAsync(ConnectionPrecheckContext ctx, ConnectionPrecheckOptions cfg, CancellationToken ct)
+    private async Task<ConnectionPrecheckResult> RunChecksAsync(ConnectionPrecheckContext ctx, ConnectionPrecheckOptions cfg, CancellationToken budgetCt, CancellationToken callerCt)
     {
-        var all = new (string Category, DnsblZoneOptions[] Zones)[]
+        var all = new (string Category, DnsblZoneOptions[] Zones, int TimeoutMs)[]
         {
-            ("DNSBL", cfg.Dnsbl),
-            ("Tor", cfg.TorDnsbl),
-            ("VPN", cfg.VpnDnsbl),
+            ("DNSBL", cfg.Dnsbl, cfg.DnsblTimeoutMs),
+            ("Tor", cfg.TorDnsbl, cfg.TorTimeoutMs),
+            ("VPN", cfg.VpnDnsbl, cfg.VpnTimeoutMs),
         };
 
-        foreach (var (category, zones) in all)
+        foreach (var (category, zones, categoryTimeoutMs) in all)
         {
             if (zones is null || zones.Length == 0)
             {
                 continue;
             }
+
+            using var perCheckCts = CancellationTokenSource.CreateLinkedTokenSource(budgetCt);
+            var perCheckMs = categoryTimeoutMs > 0 ? categoryTimeoutMs : cfg.GlobalTimeoutMs;
+            perCheckCts.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(1, perCheckMs)));
+            var perCheckCt = perCheckCts.Token;
 
             foreach (var z in zones)
             {
@@ -98,16 +111,43 @@ public sealed class ConnectionPrecheckPipeline : IConnectionPrecheckPipeline
                 var listed = false;
                 try
                 {
-                    listed = await _dns.HasAnyAddressAsync(query, ct);
+                    listed = await _dns.HasAnyAddressAsync(query, perCheckCt);
                 }
                 catch (OperationCanceledException)
                 {
-                    return new ConnectionPrecheckResult(true, null);
+                    if (callerCt.IsCancellationRequested)
+                    {
+                        // Server shutdown / accept loop cancellation.
+                        return new ConnectionPrecheckResult(true, null);
+                    }
+
+                    _metrics?.Timeout();
+
+                    if (cfg.FailOpen)
+                    {
+                        _logger.LogDebug("Precheck timeout for {Query} (fail-open)", query);
+                        return new ConnectionPrecheckResult(true, null);
+                    }
+
+                    _logger.LogDebug("Precheck timeout for {Query} (fail-closed)", query);
+                    _metrics?.Deny();
+                    return new ConnectionPrecheckResult(false, TimeoutRejectMessage);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "Precheck DNS error for {Query}", query);
-                    listed = false;
+                    _metrics?.Error();
+
+                    if (cfg.FailOpen)
+                    {
+                        _logger.LogDebug(ex, "Precheck DNS error for {Query} (fail-open)", query);
+                        listed = false;
+                    }
+                    else
+                    {
+                        _logger.LogDebug(ex, "Precheck DNS error for {Query} (fail-closed)", query);
+                        _metrics?.Deny();
+                        return new ConnectionPrecheckResult(false, TimeoutRejectMessage);
+                    }
                 }
 
                 if (!listed)
@@ -130,7 +170,7 @@ public sealed class ConnectionPrecheckPipeline : IConnectionPrecheckPipeline
                             Reason = message,
                             SetBy = "precheck",
                             ExpiresAt = expiresAt,
-                        }, ct);
+                        }, perCheckCt);
                     }
                     catch (Exception ex)
                     {
@@ -138,6 +178,7 @@ public sealed class ConnectionPrecheckPipeline : IConnectionPrecheckPipeline
                     }
                 }
 
+                _metrics?.Deny();
                 return new ConnectionPrecheckResult(false, message);
             }
         }
