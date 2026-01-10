@@ -20,9 +20,19 @@ namespace IRCd.Services.Storage
         private readonly ConcurrentDictionary<string, NickAccount> _accounts = new(StringComparer.OrdinalIgnoreCase);
         private readonly ILogger<FileNickAccountRepository>? _logger;
 
-        public FileNickAccountRepository(string path, ILogger<FileNickAccountRepository>? logger = null)
+        private readonly IRCd.Shared.Options.ServicesPersistenceOptions _persistence;
+
+        private int _dirty;
+        private int _saveScheduled;
+        private DateTimeOffset _lastSaveUtc;
+
+        public FileNickAccountRepository(
+            string path,
+            IRCd.Shared.Options.ServicesPersistenceOptions? persistence = null,
+            ILogger<FileNickAccountRepository>? logger = null)
         {
             _path = string.IsNullOrWhiteSpace(path) ? throw new ArgumentException("Path is required", nameof(path)) : path;
+            _persistence = persistence ?? new IRCd.Shared.Options.ServicesPersistenceOptions();
             _logger = logger;
             LoadBestEffort();
         }
@@ -56,7 +66,7 @@ namespace IRCd.Services.Storage
                 return ValueTask.FromResult(false);
             }
 
-            return ValueTask.FromResult(SaveBestEffort());
+            return ValueTask.FromResult(MarkDirtyAndMaybeSaveBestEffort());
         }
 
         public ValueTask<bool> TryUpdatePasswordHashAsync(string name, string passwordHash, CancellationToken ct)
@@ -78,7 +88,7 @@ namespace IRCd.Services.Storage
                 var updated = existing with { PasswordHash = passwordHash };
                 if (_accounts.TryUpdate(key, updated, existing))
                 {
-                    return ValueTask.FromResult(SaveBestEffort());
+                    return ValueTask.FromResult(MarkDirtyAndMaybeSaveBestEffort());
                 }
             }
         }
@@ -101,7 +111,7 @@ namespace IRCd.Services.Storage
 
                 if (_accounts.TryUpdate(key, updated, existing))
                 {
-                    return ValueTask.FromResult(SaveBestEffort());
+                    return ValueTask.FromResult(MarkDirtyAndMaybeSaveBestEffort());
                 }
             }
         }
@@ -120,7 +130,7 @@ namespace IRCd.Services.Storage
                 return ValueTask.FromResult(false);
             }
 
-            return ValueTask.FromResult(SaveBestEffort());
+            return ValueTask.FromResult(MarkDirtyAndMaybeSaveBestEffort());
         }
 
         private void LoadBestEffort()
@@ -131,6 +141,11 @@ namespace IRCd.Services.Storage
                 var full = Path.IsPathRooted(expanded)
                     ? expanded
                     : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, expanded));
+
+                if (_persistence.RecoverTmpOnStartup)
+                {
+                    AtomicJsonFilePersistence.RecoverBestEffort(full, _persistence, _logger);
+                }
 
                 if (!File.Exists(full))
                 {
@@ -163,7 +178,50 @@ namespace IRCd.Services.Storage
             }
         }
 
-        private bool SaveBestEffort()
+        private bool MarkDirtyAndMaybeSaveBestEffort()
+        {
+            Interlocked.Exchange(ref _dirty, 1);
+
+            var intervalSeconds = Math.Max(0, _persistence.SaveIntervalSeconds);
+            if (intervalSeconds == 0)
+            {
+                return SaveNowBestEffort();
+            }
+
+            if (DateTimeOffset.UtcNow - _lastSaveUtc >= TimeSpan.FromSeconds(intervalSeconds))
+            {
+                return SaveNowBestEffort();
+            }
+
+            ScheduleDeferredSave(intervalSeconds);
+            return true;
+        }
+
+        private void ScheduleDeferredSave(int intervalSeconds)
+        {
+            if (Interlocked.CompareExchange(ref _saveScheduled, 1, 0) != 0)
+                return;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(intervalSeconds)).ConfigureAwait(false);
+                    SaveNowBestEffort();
+                }
+                catch { }
+                finally
+                {
+                    Interlocked.Exchange(ref _saveScheduled, 0);
+                    if (Volatile.Read(ref _dirty) == 1)
+                    {
+                        ScheduleDeferredSave(intervalSeconds);
+                    }
+                }
+            });
+        }
+
+        private bool SaveNowBestEffort()
         {
             lock (_gate)
             {
@@ -183,10 +241,9 @@ namespace IRCd.Services.Storage
                     var snapshot = _accounts.Values.OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToList();
                     var json = JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true });
 
-                    var tmp = full + ".tmp";
-                    File.WriteAllText(tmp, json);
-                    File.Copy(tmp, full, overwrite: true);
-                    File.Delete(tmp);
+                    AtomicJsonFilePersistence.WriteAtomicJsonBestEffort(full, json, _persistence, _logger);
+                    _lastSaveUtc = DateTimeOffset.UtcNow;
+                    Interlocked.Exchange(ref _dirty, 0);
                     return true;
                 }
                 catch

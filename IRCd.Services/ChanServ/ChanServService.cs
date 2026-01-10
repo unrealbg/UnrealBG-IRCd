@@ -11,7 +11,6 @@ namespace IRCd.Services.ChanServ
     using IRCd.Core.State;
     using IRCd.Core.Protocol;
     using IRCd.Core.Services;
-    using IRCd.Services.Auth;
     using IRCd.Services.NickServ;
     using IRCd.Services.Storage;
     using IRCd.Services.SeenServ;

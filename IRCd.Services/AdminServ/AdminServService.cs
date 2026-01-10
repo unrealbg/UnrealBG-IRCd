@@ -1,8 +1,6 @@
 namespace IRCd.Services.AdminServ
 {
     using System;
-    using System.Collections.Generic;
-    using System.Linq;
     using System.Threading;
     using System.Threading.Tasks;
 
@@ -10,7 +8,6 @@ namespace IRCd.Services.AdminServ
     using IRCd.Core.Protocol;
     using IRCd.Core.Services;
     using IRCd.Core.State;
-    using IRCd.Services.Auth;
     using IRCd.Services.Storage;
     using IRCd.Shared.Options;
 
@@ -406,7 +403,7 @@ namespace IRCd.Services.AdminServ
         {
             var flags = (e.Flags ?? Array.Empty<string>()).Length == 0
                 ? "(none)"
-                : string.Join(',', e.Flags);
+                : string.Join(',', e.Flags ?? Array.Empty<string>());
 
             var cls = string.IsNullOrWhiteSpace(e.OperClass) ? "(none)" : e.OperClass;
             return $"Staff {e.Account}: flags={flags} operclass={cls}";

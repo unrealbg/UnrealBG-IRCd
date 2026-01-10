@@ -5,6 +5,8 @@
     using System.Threading;
     using System.Threading.Tasks;
 
+    using IRCd.Core.Abstractions;
+
     public sealed class InMemoryAuthState : IAuthState
     {
         private readonly ConcurrentDictionary<string, string> _identified =

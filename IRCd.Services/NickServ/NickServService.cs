@@ -1,6 +1,7 @@
 ﻿namespace IRCd.Services.NickServ
 {
     using System;
+    using System.Collections.Concurrent;
     using System.Linq;
     using System.Threading;
     using System.Threading.Tasks;
@@ -8,7 +9,6 @@
     using IRCd.Core.Abstractions;
     using IRCd.Core.Services;
     using IRCd.Core.State;
-    using IRCd.Services.Auth;
     using IRCd.Services.Email;
     using IRCd.Services.MemoServ;
     using IRCd.Services.Storage;
@@ -18,6 +18,8 @@
 
     public sealed class NickServService
     {
+        private const int NotRegisteredCooldownMs = 2000;
+
         private readonly IOptions<IrcOptions> _options;
         private readonly INickAccountRepository _repo;
         private readonly IAuthState _auth;
@@ -26,6 +28,8 @@
         private readonly ISessionRegistry? _sessions;
         private readonly IChanServChannelRepository? _channels;
         private readonly IRCd.Core.Services.RuntimeDenyService? _deny;
+
+        private readonly ConcurrentDictionary<string, long> _notRegisteredUntilTickByConn = new(StringComparer.Ordinal);
 
         public NickServService(IOptions<IrcOptions> options, INickAccountRepository repo, IAuthState auth, IEmailSender email, IMemoRepository memos, ISessionRegistry? sessions = null, IChanServChannelRepository? channels = null, IRCd.Core.Services.RuntimeDenyService? deny = null)
         {
@@ -483,7 +487,7 @@
             var account = await _repo.GetByNameAsync(targetNick, ct);
             if (account is null)
             {
-                await ReplyAsync(session, "This nickname is not registered.", ct);
+                await ReplyNotRegisteredThrottledAsync(session, ct);
                 return;
             }
 
@@ -550,7 +554,7 @@
             var account = await _repo.GetByNameAsync(nick, ct);
             if (account is null)
             {
-                await ReplyAsync(session, "This nickname is not registered.", ct);
+                await ReplyNotRegisteredThrottledAsync(session, ct);
                 return;
             }
 
@@ -799,7 +803,7 @@ $"You receive this message due to the command issued by: {issuedBy}\n";
             var account = await _repo.GetByNameAsync(targetNick, ct);
             if (account is null)
             {
-                await ReplyAsync(session, "This nickname is not registered.", ct);
+                await ReplyNotRegisteredThrottledAsync(session, ct);
                 return;
             }
 
@@ -1634,6 +1638,35 @@ $"You receive this message due to the command issued by: {issuedBy}\n";
             var to = session.Nick ?? "*";
             var line = $":{NickServMessages.ServiceName}!services@{server} NOTICE {to} :{text}";
             return session.SendAsync(line, ct);
+        }
+
+        private ValueTask ReplyNotRegisteredThrottledAsync(IClientSession session, CancellationToken ct)
+        {
+            var conn = session.ConnectionId;
+            if (string.IsNullOrWhiteSpace(conn))
+            {
+                return ReplyAsync(session, "This nickname is not registered.", ct);
+            }
+
+            var now = Environment.TickCount64;
+
+            if (_notRegisteredUntilTickByConn.TryGetValue(conn, out var until) && now < until)
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            _notRegisteredUntilTickByConn[conn] = now + NotRegisteredCooldownMs;
+
+            if (_notRegisteredUntilTickByConn.Count > 10_000)
+            {
+                foreach (var kvp in _notRegisteredUntilTickByConn)
+                {
+                    if (now >= kvp.Value)
+                        _notRegisteredUntilTickByConn.TryRemove(kvp.Key, out _);
+                }
+            }
+
+            return ReplyAsync(session, "This nickname is not registered.", ct);
         }
     }
 }
