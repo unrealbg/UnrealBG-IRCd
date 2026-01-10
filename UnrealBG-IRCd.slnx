@@ -13,5 +13,10 @@
   <Folder Name="/transport/">
     <Project Path="IRCd.Transport/IRCd.Transport.csproj" />
   </Folder>
+  <Folder Name="/tools/">
+    <Project Path="IRCd.LoadTest/IRCd.LoadTest.csproj" />
+    <Project Path="IRCd.Tools.HashPassword/IRCd.Tools.HashPassword.csproj" />
+  </Folder>
   <Project Path="IRCd.Tests/IRCd.Tests.csproj" Id="973413bd-1b7f-45dd-9779-2bc380f345d1" />
+  <Project Path="IRCd.IntegrationTests/IRCd.IntegrationTests.csproj" />
 </Solution>
