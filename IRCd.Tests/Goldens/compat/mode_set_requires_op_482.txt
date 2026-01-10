@@ -1,0 +1,2 @@
+﻿# MODE #c +m
+:Alice!ident@host MODE #c +m

@@ -1,0 +1,2 @@
+﻿# Bob JOIN #c
+:server 474 Bob #c :Cannot join channel (+b)

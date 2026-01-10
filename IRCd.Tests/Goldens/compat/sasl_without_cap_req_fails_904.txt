@@ -1,0 +1,2 @@
+﻿# AUTHENTICATE PLAIN
+:server 904 Nick :SASL authentication failed

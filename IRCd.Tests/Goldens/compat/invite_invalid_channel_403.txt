@@ -1,0 +1,2 @@
+﻿# script
+:server 403 Nick !!! :No such channel

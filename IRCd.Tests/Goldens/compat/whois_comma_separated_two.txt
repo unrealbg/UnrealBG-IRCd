@@ -1,0 +1,11 @@
+﻿# WHOIS Alice,Bob
+:server 311 Req Alice ident host * :Real Name
+:server 312 Req Alice server :test
+:server 378 Req Alice :is connecting from *@host
+:server 317 Req Alice 10 1699999900 :seconds idle, signon time
+:server 318 Req Alice :End of /WHOIS list.
+:server 311 Req Bob ident host * :Real Name
+:server 312 Req Bob server :test
+:server 378 Req Bob :is connecting from *@host
+:server 317 Req Bob 10 1699999900 :seconds idle, signon time
+:server 318 Req Bob :End of /WHOIS list.

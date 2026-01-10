@@ -1,0 +1,4 @@
+﻿# MODE #c +b
+:server 367 Alice #c *!*@bad.host Alice 1700000123
+:server 367 Alice #c bad!*@* Alice 1700000124
+:server 368 Alice #c :End of Channel Ban List

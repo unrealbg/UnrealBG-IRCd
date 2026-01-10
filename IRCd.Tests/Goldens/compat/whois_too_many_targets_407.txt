@@ -1,0 +1,2 @@
+﻿# WHOIS a,b
+:server 407 Req :Too many targets

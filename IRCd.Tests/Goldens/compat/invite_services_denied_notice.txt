@@ -1,0 +1,2 @@
+﻿# INVITE NickServ #c
+:server NOTICE Alice :Cannot INVITE services

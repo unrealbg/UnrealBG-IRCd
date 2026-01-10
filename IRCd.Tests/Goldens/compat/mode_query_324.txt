@@ -1,0 +1,2 @@
+﻿# MODE #c
+:server 324 Alice #c +ntm

@@ -1,0 +1,3 @@
+﻿# MODE #c +e
+:server 348 Alice #c *!*@good.host Alice 1700000123
+:server 349 Alice #c :End of Channel Exception List

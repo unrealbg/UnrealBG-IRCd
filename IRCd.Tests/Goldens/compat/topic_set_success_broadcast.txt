@@ -1,0 +1,4 @@
+﻿# Alice sets TOPIC
+:Alice!ident@localhost TOPIC #c :New topic
+# Bob receives
+:Alice!ident@localhost TOPIC #c :New topic

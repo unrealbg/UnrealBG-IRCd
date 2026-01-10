@@ -1,0 +1,3 @@
+﻿# NAMES #c
+:server 353 Alice = #c :@Alice
+:server 366 Alice #c :End of /NAMES list.

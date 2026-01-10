@@ -1,0 +1,2 @@
+﻿# script
+:server 479 Nick !!! :Illegal channel name

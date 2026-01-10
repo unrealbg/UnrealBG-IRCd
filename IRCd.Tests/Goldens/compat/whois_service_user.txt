@@ -1,0 +1,4 @@
+﻿# WHOIS NickServ
+:server 311 Req NickServ NickServ services.host * :Services
+:server 312 Req NickServ services.host :testnet network services
+:server 318 Req NickServ :End of /WHOIS list.

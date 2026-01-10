@@ -1,0 +1,6 @@
+﻿# Bob JOIN #c
+:Bob!ident@host JOIN :#c
+:server 331 Bob #c :No topic is set
+:server 329 Bob #c 100
+:server 353 Bob = #c :@Alice Bob
+:server 366 Bob #c :End of /NAMES list.

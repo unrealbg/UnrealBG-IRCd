@@ -1,0 +1,3 @@
+﻿# CAP REQ :sasl
+# AUTHENTICATE *
+:server 904 Nick :SASL authentication failed

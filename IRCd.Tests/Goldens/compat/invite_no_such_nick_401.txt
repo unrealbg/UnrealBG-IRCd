@@ -1,0 +1,2 @@
+﻿# INVITE Missing #c
+:server 401 Alice Missing :No such nick

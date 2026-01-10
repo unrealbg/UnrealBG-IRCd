@@ -1,0 +1,6 @@
+﻿# Add invite exception
+:Alice!ident@host MODE #c +I Alice!*@host
+# Remove invite exception
+:Alice!ident@host MODE #c -I Alice!*@host
+# List invite exceptions
+:server 347 Alice #c :End of Channel Invite Exception List

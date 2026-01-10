@@ -1,0 +1,4 @@
+﻿# MOTD
+:server 375 Nick :- server Message of the Day -
+:server 372 Nick :- test motd
+:server 376 Nick :End of /MOTD command.

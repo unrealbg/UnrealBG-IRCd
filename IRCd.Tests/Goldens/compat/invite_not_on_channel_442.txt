@@ -1,0 +1,2 @@
+﻿# INVITE Bob #c
+:server 442 Alice #c :You're not on that channel

@@ -1,0 +1,2 @@
+﻿# TOPIC #c
+:server 331 Alice #c :No topic is set

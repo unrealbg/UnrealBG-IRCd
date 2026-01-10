@@ -1,0 +1,2 @@
+﻿# script
+:server 401 Nick NoSuchNick :No such nick

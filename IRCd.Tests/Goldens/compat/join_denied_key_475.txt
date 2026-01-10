@@ -1,0 +1,2 @@
+﻿# Bob JOIN #c wrong
+:server 475 Bob #c :Cannot join channel (+k)

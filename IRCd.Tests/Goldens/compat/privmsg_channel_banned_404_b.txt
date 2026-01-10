@@ -1,0 +1,2 @@
+﻿# Alice PRIVMSG #c
+:server 404 Alice #c :Cannot send to channel (+b)

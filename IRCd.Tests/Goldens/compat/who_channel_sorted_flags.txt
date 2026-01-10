@@ -1,0 +1,5 @@
+﻿# WHO #c
+:server 352 Alice #c ident host server Alice H@ :0 Real Name
+:server 352 Alice #c ident host server bob G :0 Real Name
+:server 352 Alice #c ident host server Carol H :0 Real Name
+:server 315 Alice #c :End of /WHO list.

@@ -1,0 +1,2 @@
+﻿# CAP LS
+:server CAP Nick LS :server-time message-tags multi-prefix away-notify account-notify sasl=PLAIN,EXTERNAL extended-join userhost-in-names echo-message
