@@ -13,6 +13,18 @@
         public int MaxConnectionsPerWindowPerIp { get; set; } = 20;
 
         /// <summary>
+        /// Max new TLS connections allowed per IP within the window.
+        /// If not set explicitly, you typically want this to match MaxConnectionsPerWindowPerIp.
+        /// </summary>
+        public int MaxConnectionsPerWindowPerIpTls { get; set; } = 20;
+
+        /// <summary>
+        /// Max TLS handshakes allowed per IP within the window.
+        /// This is evaluated before AuthenticateAsServerAsync starts.
+        /// </summary>
+        public int MaxTlsHandshakesPerWindowPerIp { get; set; } = 20;
+
+        /// <summary>
         /// Sliding window for MaxConnectionsPerWindowPerIp.
         /// </summary>
         public int WindowSeconds { get; set; } = 60;
@@ -31,6 +43,17 @@
         /// Client must complete registration (NICK+USER) within this time or gets disconnected.
         /// </summary>
         public int RegistrationTimeoutSeconds { get; set; } = 30;
+
+        /// <summary>
+        /// TLS handshake must complete within this time or gets disconnected.
+        /// </summary>
+        public int TlsHandshakeTimeoutSeconds { get; set; } = 10;
+
+        /// <summary>
+        /// Optional global cap on simultaneous active connections (registered or unregistered).
+        /// Set to 0 to disable.
+        /// </summary>
+        public int GlobalMaxActiveConnections { get; set; } = 0;
 
         /// <summary>
         /// Message shown when a connection is refused early.

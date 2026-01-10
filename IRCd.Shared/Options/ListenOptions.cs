@@ -8,6 +8,10 @@ namespace IRCd.Shared.Options
 
         public bool EnableTls { get; set; } = false;
 
+        // If enabled, the TLS listener will request (but not require) a client certificate.
+        // This is needed for SASL EXTERNAL (client-certificate based auth).
+        public bool RequestClientCertificate { get; set; } = false;
+
         public string? TlsCertificatePath { get; set; }
 
         public string? TlsCertificatePassword { get; set; }
