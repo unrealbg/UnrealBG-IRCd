@@ -1,4 +1,5 @@
 ﻿using System.IO;
+using System.Linq;
 
 using IRCd.Core.Abstractions;
 using IRCd.Core.Commands;
@@ -7,6 +8,7 @@ using IRCd.Core.Commands.Handlers;
 using IRCd.Core.Protocol;
 using IRCd.Core.Services;
 using IRCd.Core.State;
+using IRCd.Core.Security;
 using IRCd.Services.DependencyInjection;
 using IRCd.Server.HostedServices;
 using IRCd.Shared.Options;
@@ -18,43 +20,101 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
+using Serilog;
+using Serilog.Events;
+
 using IRCd.Core.Config;
 
+static string DetermineContentRoot()
+{
+    var baseDir = AppContext.BaseDirectory;
+    var baseHasConfs = Directory.Exists(Path.Combine(baseDir, "confs"));
+    if (baseHasConfs)
+    {
+        return baseDir;
+    }
+
+    // Dev-time convenience (bin/{Debug|Release}/... -> project root)
+    var devCandidate = Path.GetFullPath(Path.Combine(baseDir, "..", "..", ".."));
+    var devHasConfs = Directory.Exists(Path.Combine(devCandidate, "confs"));
+    if (devHasConfs)
+    {
+        return devCandidate;
+    }
+
+    // Safe fallback: keep everything relative to the executable.
+    return baseDir;
+}
+
 var host = Host.CreateDefaultBuilder(args)
-    .UseContentRoot(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..")))
+    .UseContentRoot(DetermineContentRoot())
+    .UseSerilog((ctx, services, lc) =>
+    {
+        // Prefer config-driven setup (confs/appsettings.json), but keep a safe default for dev.
+        var hasConfig = ctx.Configuration.GetSection("Serilog").GetChildren().Any();
+
+        lc.ReadFrom.Services(services);
+
+        if (hasConfig)
+        {
+            lc.ReadFrom.Configuration(ctx.Configuration);
+            return;
+        }
+
+        lc.MinimumLevel.Information()
+            .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
+            .MinimumLevel.Override("System", LogEventLevel.Warning)
+            .Enrich.FromLogContext()
+            .WriteTo.Console(
+                outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {SourceContext} {Message:lj}{NewLine}{Exception}");
+    })
     .ConfigureAppConfiguration((ctx, cfg) =>
     {
         var contentRoot = ctx.HostingEnvironment.ContentRootPath;
-        cfg.AddJsonFile(Path.Combine(contentRoot, "appsettings.json"), optional: true, reloadOnChange: true);
-        cfg.AddJsonFile(Path.Combine(contentRoot, $"appsettings.{ctx.HostingEnvironment.EnvironmentName}.json"), optional: true);
+        cfg.AddJsonFile(Path.Combine(contentRoot, "confs", "appsettings.json"), optional: true, reloadOnChange: true);
+        cfg.AddJsonFile(Path.Combine(contentRoot, "confs", $"appsettings.{ctx.HostingEnvironment.EnvironmentName}.json"), optional: true);
         cfg.AddEnvironmentVariables(prefix: "IRCD_");
         cfg.AddCommandLine(args);
     })
-    .ConfigureLogging(logging =>
-    {
-        logging.ClearProviders();
-        logging.AddConsole();
-    })
     .ConfigureServices((ctx, services) =>
     {
-        // Options
-        services.AddOptions<IrcOptions>()
-            .Bind(ctx.Configuration.GetSection("Irc"))
-            .PostConfigure(o =>
-            {
-                var conf = o.ConfigFile;
-                if (string.IsNullOrWhiteSpace(conf))
-                    conf = "ircd.conf";
+        // Options (atomic snapshot store; supports transactional REHASH)
+        var probe = new IrcOptions();
+        ctx.Configuration.GetSection("Irc").Bind(probe);
 
-                var confPath = Path.IsPathRooted(conf)
-                    ? conf
-                    : Path.Combine(ctx.HostingEnvironment.ContentRootPath, conf);
+        var conf = probe.ConfigFile;
+        if (string.IsNullOrWhiteSpace(conf))
+            conf = "confs/ircd.conf";
 
-                if (File.Exists(confPath))
-                {
-                    IrcdConfLoader.ApplyConfFile(o, confPath);
-                }
-            });
+        var confPath = Path.IsPathRooted(conf)
+            ? conf
+            : Path.Combine(ctx.HostingEnvironment.ContentRootPath, conf);
+
+        var selectedProfile = probe.Security?.Profile ?? "default";
+        if (File.Exists(confPath))
+        {
+            var p = IrcdConfLoader.TryGetSecurityProfile(confPath);
+            if (!string.IsNullOrWhiteSpace(p))
+                selectedProfile = p;
+        }
+
+        var initial = new IrcOptions();
+        initial.Security.Profile = selectedProfile;
+        SecurityProfileApplier.Apply(initial);
+
+        // Apply explicit config on top of profile defaults.
+        ctx.Configuration.GetSection("Irc").Bind(initial);
+        initial.Security.Profile = selectedProfile;
+
+        if (File.Exists(confPath))
+        {
+            IrcdConfLoader.ApplyConfFile(initial, confPath);
+        }
+
+        services.AddSingleton(new IrcOptionsStore(initial));
+        services.AddSingleton<Microsoft.Extensions.Options.IOptions<IrcOptions>>(sp => sp.GetRequiredService<IrcOptionsStore>());
+        services.AddSingleton<Microsoft.Extensions.Options.IOptionsMonitor<IrcOptions>>(sp => sp.GetRequiredService<IrcOptionsStore>());
+        services.AddSingleton<IrcConfigManager>();
 
         // Core state
         services.AddSingleton<ServerState>();
@@ -73,9 +133,19 @@ var host = Host.CreateDefaultBuilder(args)
         // Pseudo users for services
         services.AddHostedService<ServicesPseudoUsersHostedService>();
 
+        // Startup diagnostics (logs resolved MOTD paths, etc.)
+        services.AddHostedService<StartupDiagnosticsHostedService>();
+
+        // Non-IRC operational endpoints (disabled by default)
+        services.AddHostedService<ObservabilityHttpHostedService>();
+
         // Observability
-            services.AddSingleton<WatchService>();
+        services.AddSingleton<WatchService>();
         services.AddSingleton<IMetrics, DefaultMetrics>();
+        services.AddSingleton<IAcceptLoopStatus, AcceptLoopStatus>();
+
+        // Time
+        services.AddSingleton<IServerClock, SystemServerClock>();
 
         // Core services
         // Unified ban engine
@@ -109,12 +179,35 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<RuntimeTriggerService>();
         services.AddSingleton<WhowasService>();
 
+        // Connection prechecks (DNSBL/Tor/VPN heuristics; default disabled)
+        services.AddSingleton<IDnsResolver, SystemDnsResolver>();
+        services.AddSingleton<IConnectionPrecheckPipeline, ConnectionPrecheckPipeline>();
+
+        // Audit logging (disabled by default)
+        services.AddSingleton<IAuditLogService, AuditLogService>();
+
+        // Security
+        services.AddSingleton<IOperPasswordVerifier, OperPasswordVerifier>();
+
+        services.AddSingleton<BanMatcher>();
+
+        // SASL
+        services.AddSingleton<SaslService>();
+
+        // Log redaction
+        services.AddSingleton<IIrcLogRedactor, DefaultIrcLogRedactor>();
+
         // Flood protection
         services.AddSingleton<FloodService>();
+
+        // Automatic temporary DLINE escalation (disabled by default; configured via autodline { ... })
+        services.AddSingleton<AutoDlineService>();
+        services.AddSingleton<IAutoDlineMetrics>(sp => sp.GetRequiredService<AutoDlineService>());
 
         // Command handlers
         services.AddSingleton<IIrcCommandHandler, PingHandler>();
         services.AddSingleton<IIrcCommandHandler, CapHandler>();
+        services.AddSingleton<IIrcCommandHandler, AuthenticateHandler>();
         services.AddSingleton<IIrcCommandHandler, PassHandler>();
         services.AddSingleton<IIrcCommandHandler, NickHandler>();
         services.AddSingleton<IIrcCommandHandler, UserHandler>();
