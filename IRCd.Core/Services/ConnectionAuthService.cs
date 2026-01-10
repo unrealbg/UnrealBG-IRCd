@@ -29,15 +29,21 @@ namespace IRCd.Core.Services
         {
             var auth = _options.Value.Auth;
             if (auth is null || !auth.Enabled)
+            {
                 return;
+            }
 
             if (session is null || string.IsNullOrWhiteSpace(session.ConnectionId))
+            {
                 return;
+            }
 
             var connectionId = session.ConnectionId;
 
             if (_inflight.ContainsKey(connectionId))
+            {
                 return;
+            }
 
             var task = Task.Run(async () =>
             {
@@ -68,10 +74,14 @@ namespace IRCd.Core.Services
         public async ValueTask AwaitAuthChecksAsync(string connectionId, CancellationToken ct)
         {
             if (string.IsNullOrWhiteSpace(connectionId))
+            {
                 return;
+            }
 
             if (!_inflight.TryGetValue(connectionId, out var task) || task is null)
+            {
                 return;
+            }
 
             try
             {
@@ -91,7 +101,9 @@ namespace IRCd.Core.Services
         {
             var auth = _options.Value.Auth;
             if (auth is null || !auth.Enabled)
+            {
                 return;
+            }
 
             await session.SendAsync($"NOTICE AUTH :*** Checking your IP address...", ct);
 
@@ -140,7 +152,9 @@ namespace IRCd.Core.Services
                 var hostEntryTask = Dns.GetHostEntryAsync(ip);
                 var completed = await Task.WhenAny(hostEntryTask, Task.Delay(timeout, ct));
                 if (completed != hostEntryTask)
+                {
                     return null;
+                }
 
                 var hostEntry = await hostEntryTask;
                 return hostEntry.HostName;
@@ -159,7 +173,9 @@ namespace IRCd.Core.Services
         private async Task<string?> CheckIdentAsync(IPAddress ip, int remotePort, int localPort, TimeSpan timeout, CancellationToken ct)
         {
             if (remotePort == 0 || localPort == 0)
+            {
                 return null;
+            }
 
             try
             {
@@ -196,6 +212,10 @@ namespace IRCd.Core.Services
                 return null;
             }
             catch (SocketException)
+            {
+                return null;
+            }
+            catch (IOException ex) when (ex.InnerException is SocketException)
             {
                 return null;
             }

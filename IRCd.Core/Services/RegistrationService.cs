@@ -1,15 +1,11 @@
 ﻿namespace IRCd.Core.Services
 {
     using System;
-    using System.Collections.Generic;
-    using System.IO;
     using System.Linq;
-    using System.Net;
     using System.Threading;
     using System.Threading.Tasks;
 
     using IRCd.Core.Abstractions;
-    using IRCd.Core.Protocol;
     using IRCd.Core.State;
     using IRCd.Shared.Options;
 
@@ -23,8 +19,9 @@
         private readonly WatchService _watch;
         private readonly ConnectionAuthService? _auth;
         private readonly BanService _banService;
+        private readonly ServerLinkService? _links;
 
-        public RegistrationService(IOptions<IrcOptions> options, MotdSender motd, IMetrics metrics, WatchService watch, BanService banService, ConnectionAuthService? auth = null)
+        public RegistrationService(IOptions<IrcOptions> options, MotdSender motd, IMetrics metrics, WatchService watch, BanService banService, ConnectionAuthService? auth = null, ServerLinkService? links = null)
         {
             _options = options;
             _motd = motd;
@@ -32,15 +29,20 @@
             _watch = watch;
             _banService = banService;
             _auth = auth;
+            _links = links;
         }
 
         public async ValueTask TryCompleteRegistrationAsync(IClientSession session, ServerState state, CancellationToken ct)
         {
             if (session.IsRegistered)
+            {
                 return;
+            }
 
             if (string.IsNullOrWhiteSpace(session.Nick) || string.IsNullOrWhiteSpace(session.UserName))
+            {
                 return;
+            }
 
             if (!string.IsNullOrWhiteSpace(_options.Value.ClientPassword) && !session.PassAccepted)
             {
@@ -58,6 +60,19 @@
                 user.Nick = session.Nick;
                 user.UserName = session.UserName;
                 user.IsRegistered = true;
+
+                if (string.IsNullOrWhiteSpace(user.Uid))
+                {
+                    var sid = _options.Value.ServerInfo?.Sid ?? "001";
+                    user.Uid = $"{sid}{session.ConnectionId[..Math.Min(6, session.ConnectionId.Length)].ToUpperInvariant()}";
+                    user.RemoteSid = sid;
+                    user.IsRemote = false;
+
+                    if (user.NickTs <= 0)
+                    {
+                        user.NickTs = ChannelTimestamps.NowTs();
+                    }
+                }
 
                 if (user.IsSecureConnection)
                 {
@@ -88,6 +103,11 @@
                 }
 
                 await _watch.NotifyLogonAsync(state, user, ct);
+
+                if (_links is not null)
+                {
+                    await _links.PropagateUserAsync(user, ct);
+                }
             }
 
             var nick = session.Nick!;
@@ -96,10 +116,11 @@
             var serverVersion = _options.Value.ServerInfo?.Version ?? "UnrealBG-IRCd";
             var networkName = _options.Value.ServerInfo?.Network ?? "IRCd";
 
-            var clientPort = 6667;
+            var listen = _options.Value.Listen ?? new ListenOptions();
+            var clientPort = listen.ClientPort > 0 ? listen.ClientPort : 6667;
             if (state.TryGetUser(session.ConnectionId, out var usr) && usr is not null && usr.IsSecureConnection)
             {
-                clientPort = 6697;
+                clientPort = listen.TlsClientPort > 0 ? listen.TlsClientPort : 6697;
             }
 
             const string userModeLetters = "ioZ";
@@ -119,6 +140,7 @@
             var awayLen = (isupport.AwayLen > 0 ? isupport.AwayLen : 200).ToString(System.Globalization.CultureInfo.InvariantCulture);
             var elist = string.IsNullOrWhiteSpace(isupport.EList) ? "MNU" : isupport.EList;
             var kickLen = isupport.KickLen > 0 ? isupport.KickLen : 160;
+            var maxListModes = _options.Value.Limits?.MaxListModes > 0 ? _options.Value.Limits.MaxListModes : 60;
 
             if (_auth is not null)
             {
@@ -132,10 +154,10 @@
             await session.SendAsync($":{serverName} 004 {nick} {serverName} {serverVersion} {userModeLetters} {channelModeLetters}", ct);
 
             await session.SendAsync(
-                $":{serverName} 005 {nick} CALLERID CASEMAPPING={caseMapping} DEAF=D KICKLEN={kickLen} MODES={maxModes} NICKLEN={nickLen} PREFIX={prefix} STATUSMSG={statusMsg} TOPICLEN={topicLen} NETWORK={networkName} MAXLIST=beI:60 CHANTYPES={chanTypes} :are supported by this server",
+                $":{serverName} 005 {nick} CALLERID CASEMAPPING={caseMapping} DEAF=D KICKLEN={kickLen} MODES={maxModes} NICKLEN={nickLen} PREFIX={prefix} STATUSMSG={statusMsg} TOPICLEN={topicLen} NETWORK={networkName} MAXLIST=beI:{maxListModes} CHANTYPES={chanTypes} :are supported by this server",
                 ct);
             await session.SendAsync(
-                $":{serverName} 005 {nick} CHANLIMIT={chanTypes}:25 CHANNELLEN={chanLen} CHANMODES={chanModesIsupport} AWAYLEN={awayLen} ELIST={elist} SAFELIST KNOCK :are supported by this server",
+                $":{serverName} 005 {nick} CHANLIMIT={chanTypes}:25 CHANNELLEN={chanLen} CHANMODES={chanModesIsupport} AWAYLEN={awayLen} ELIST={elist} SAFELIST KNOCK EXCEPTS INVEX EXTBAN=~,a ACCOUNTEXTBAN=account,a :are supported by this server",
                 ct);
 
             var users = state.UserCount;
