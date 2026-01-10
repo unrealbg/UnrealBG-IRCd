@@ -1,14 +1,16 @@
 ﻿namespace IRCd.Transport.Tcp
 {
-    using IRCd.Core.Abstractions;
-
     using System;
     using System.Net;
     using System.Net.Sockets;
     using System.Text;
     using System.Threading;
-    using System.Threading.Channels;
     using System.Threading.Tasks;
+
+    using IRCd.Core.Abstractions;
+    using IRCd.Core.Services;
+
+    using Microsoft.Extensions.Logging;
 
     public sealed class TcpClientSession : IClientSession
     {
@@ -19,7 +21,11 @@
         private readonly object _userModesLock = new();
         private string _userModes = "";
 
-        private readonly Channel<string> _outgoing;
+        private readonly OutboundMessageQueue _outgoing;
+        private readonly IMetrics? _metrics;
+        private readonly ILogger<TcpClientSession>? _logger;
+
+        private readonly int _maxLineChars;
 
         private int _closed;
 
@@ -32,7 +38,10 @@
             bool keepAliveEnabled,
             int keepAliveTimeMs,
             int keepAliveIntervalMs,
-            int outgoingQueueCapacity)
+            int maxLineChars,
+            int outgoingQueueCapacity,
+            IMetrics? metrics = null,
+            ILogger<TcpClientSession>? logger = null)
         {
             ConnectionId = connectionId;
 
@@ -61,18 +70,16 @@
             _reader = LineProtocol.CreateReader(_stream);
             _writer = LineProtocol.CreateWriter(_stream);
 
+            _maxLineChars = maxLineChars > 0 ? maxLineChars : LineProtocol.MaxLineChars;
+
             RemoteEndPoint = client.Client.RemoteEndPoint ?? new IPEndPoint(IPAddress.None, 0);
 
             LocalEndPoint = localEndPoint;
 
-            var cap = outgoingQueueCapacity > 0 ? outgoingQueueCapacity : 256;
-            _outgoing = Channel.CreateBounded<string>(new BoundedChannelOptions(capacity: cap)
-            {
-                SingleReader = true,
-                SingleWriter = false,
-                AllowSynchronousContinuations = true,
-                FullMode = BoundedChannelFullMode.DropWrite
-            });
+            _metrics = metrics;
+            _logger = logger;
+
+            _outgoing = new OutboundMessageQueue(outgoingQueueCapacity, _metrics);
 
             LastActivityUtc = DateTime.UtcNow;
         }
@@ -175,8 +182,10 @@
             if (Volatile.Read(ref _closed) == 1)
                 return ValueTask.CompletedTask;
 
-            if (!_outgoing.Writer.TryWrite(line))
+            if (!_outgoing.TryEnqueue(line))
             {
+                _metrics?.OutboundQueueOverflowDisconnect();
+                _logger?.LogWarning("Send queue overflow for {ConnId}; disconnecting", ConnectionId);
                 _ = CloseAsync("Send queue overflow", ct);
             }
             return ValueTask.CompletedTask;
@@ -195,7 +204,7 @@
                     return null;
                 }
 
-                if (line.Length > LineProtocol.MaxLineChars)
+                if (line.Length > _maxLineChars)
                 {
                     await CloseAsync("Input line too long", ct);
                     return null;
@@ -221,7 +230,7 @@
         {
             try
             {
-                await foreach (var line in _outgoing.Reader.ReadAllAsync(ct))
+                await foreach (var line in _outgoing.ReadAllAsync(ct))
                 {
                     if (Volatile.Read(ref _closed) == 1)
                     {
@@ -229,6 +238,7 @@
                     }
 
                     await _writer.WriteLineAsync(line);
+                    _outgoing.MarkDequeued();
                 }
             }
             catch (OperationCanceledException)
@@ -246,6 +256,10 @@
             catch
             {
             }
+            finally
+            {
+                _outgoing.ResetDepth();
+            }
         }
 
         /// <summary>
@@ -258,11 +272,11 @@
 
             try
             {
-                _outgoing.Writer.TryWrite($":server ERROR :Closing Link: {reason}");
+                _outgoing.TryEnqueue($":server ERROR :Closing Link: {reason}");
             }
             catch { /* ignore */ }
 
-            try { _outgoing.Writer.TryComplete(); } catch { /* ignore */ }
+            try { _outgoing.Complete(); } catch { /* ignore */ }
 
             try { _client.Close(); } catch { /* ignore */ }
 
