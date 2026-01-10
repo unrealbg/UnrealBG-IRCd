@@ -1,7 +1,6 @@
 namespace IRCd.Services.OperServ
 {
     using System;
-    using System.IO;
     using System.Linq;
     using System.Threading;
     using System.Threading.Tasks;
@@ -19,10 +18,9 @@ namespace IRCd.Services.OperServ
 
     public sealed class OperServService
     {
-        private static readonly object RehashLock = new();
-
         private readonly ILogger<OperServService> _logger;
         private readonly IOptions<IrcOptions> _options;
+        private readonly IrcConfigManager _config;
         private readonly BanService _bans;
         private readonly IBanEnforcer? _banEnforcer;
         private readonly RuntimeDenyService _denies;
@@ -30,12 +28,12 @@ namespace IRCd.Services.OperServ
         private readonly RuntimeTriggerService _triggers;
         private readonly ISessionRegistry _sessions;
         private readonly RoutingService _routing;
-        private readonly IHostEnvironment? _env;
         private readonly IHostApplicationLifetime? _lifetime;
 
         public OperServService(
             ILogger<OperServService> logger,
             IOptions<IrcOptions> options,
+            IrcConfigManager config,
             BanService bans,
             RuntimeDenyService denies,
             RuntimeWarnService warns,
@@ -43,11 +41,11 @@ namespace IRCd.Services.OperServ
             ISessionRegistry sessions,
             RoutingService routing,
             IBanEnforcer? banEnforcer = null,
-            IHostEnvironment? env = null,
             IHostApplicationLifetime? lifetime = null)
         {
             _logger = logger;
             _options = options;
+            _config = config;
             _bans = bans;
             _denies = denies;
             _warns = warns;
@@ -55,7 +53,6 @@ namespace IRCd.Services.OperServ
             _sessions = sessions;
             _routing = routing;
             _banEnforcer = banEnforcer;
-            _env = env;
             _lifetime = lifetime;
         }
 
@@ -792,46 +789,19 @@ namespace IRCd.Services.OperServ
                 return;
             }
 
-            var conf = _options.Value.ConfigFile;
-            if (string.IsNullOrWhiteSpace(conf))
-            {
-                conf = "ircd.conf";
-            }
-
-            var contentRoot = _env?.ContentRootPath;
-            var baseDir = string.IsNullOrWhiteSpace(contentRoot) ? AppContext.BaseDirectory : contentRoot;
-
-            var confPath = Path.IsPathRooted(conf)
-                ? conf
-                : Path.Combine(baseDir, conf);
-
-            if (!File.Exists(confPath))
-            {
-                await ReplyAsync(session, $"REHASH failed: config file not found ({confPath})", ct);
-                return;
-            }
-
             try
             {
-                lock (RehashLock)
+                var result = _config.TryRehashFromConfiguredPath();
+                if (!result.Success)
                 {
-                    var o = _options.Value;
-
-                    o.Opers = Array.Empty<OperOptions>();
-                    o.Classes = Array.Empty<OperClassOptions>();
-                    o.KLines = Array.Empty<KLineOptions>();
-                    o.DLines = Array.Empty<DLineOptions>();
-                    o.Denies = Array.Empty<DenyOptions>();
-                    o.Warns = Array.Empty<WarnOptions>();
-                    o.Triggers = Array.Empty<TriggerOptions>();
-                    o.Links = Array.Empty<LinkOptions>();
-                    o.ListenEndpoints = Array.Empty<ListenEndpointOptions>();
-                    o.MotdByVhost = Array.Empty<MotdVhostOptions>();
-
-                    IrcdConfLoader.ApplyConfFile(o, confPath);
+                    foreach (var e in result.Errors.Take(10))
+                    {
+                        await ReplyAsync(session, e, ct);
+                    }
+                    return;
                 }
 
-                await ReplyAsync(session, $"Rehashing {Path.GetFileName(confPath)}", ct);
+                await ReplyAsync(session, "Rehashing ircd.conf", ct);
             }
             catch (Exception ex)
             {

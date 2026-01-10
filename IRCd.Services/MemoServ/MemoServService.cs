@@ -1,13 +1,10 @@
 namespace IRCd.Services.MemoServ
 {
     using System;
-    using System.Linq;
-    using System.Threading;
     using System.Threading.Tasks;
 
     using IRCd.Core.Abstractions;
     using IRCd.Core.State;
-    using IRCd.Services.Auth;
     using IRCd.Services.Storage;
     using IRCd.Shared.Options;
 

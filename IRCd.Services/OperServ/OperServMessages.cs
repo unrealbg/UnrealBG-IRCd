@@ -32,7 +32,7 @@ namespace IRCd.Services.OperServ
 
         public static string HelpClear => "CLEAR [ALL|KLINE|DLINE|DENY|WARN|TRIGGER]  - Clear runtime lists";
 
-        public static string HelpRehash => "REHASH  - Reload ircd.conf (requires oper capability rehash)";
+        public static string HelpRehash => "REHASH  - Reload confs/ircd.conf (requires oper capability rehash)";
 
         public static string HelpDie => "DIE  - Stop the server (requires oper capability die)";
 
